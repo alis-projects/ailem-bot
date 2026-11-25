@@ -1,0 +1,85 @@
+// PaymentPage shows and charges the server quote (app/api/orders), never the
+// client-side checkout numbers.
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { UserContext } from '../context/UserContext';
+import PaymentPage from '../components/pages/PaymentPage';
+
+const m = vi.hoisted(() => ({ cart: [], payme: vi.fn(() => 'https://checkout.example/pay') }));
+vi.mock('../hooks/useCart', () => ({ useCart: () => ({ cartItems: m.cart }) }));
+vi.mock('../services/payme', () => ({ generatePaymeLink: m.payme }));
+vi.mock('../lib/supabase', () => ({ supabase: {} }));
+
+const P1 = '00000000-0000-4000-8000-000000000001';
+const user = { id: '00000000-0000-4000-8000-0000000000a1', name: 'Buyer', phone: '+998900000000' };
+// Client-side numbers deliberately wrong: they must not be shown or charged
+const checkoutData = {
+  fullName: 'Buyer', phone: '+998 90 000 00 00', courier: "O'zi olib ketish", type: 'self_pickup',
+  address: 'Yunusobod-19', useBonusPoints: false, subtotal: 1000, deliveryFee: 0, bonusDiscount: 0, total: 1000
+};
+const quote = (total) => ({ items: [], subtotal: total, deliveryFee: 0, shippingPaymentType: 'prepaid', bonusPointsUsed: 0, bonusDiscount: 0, total });
+const json = (status, body) => Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
+
+let fetchMock;
+beforeEach(() => {
+  m.cart = [{ id: P1, name: 'Choyshab', price: 1, quantity: 2, selectedColor: null, selectedSize: null }];
+  m.payme.mockClear();
+  fetchMock = vi.fn();
+  global.fetch = fetchMock;
+  delete window.location;
+  window.location = { href: 'http://localhost/payment' };
+});
+
+const renderPage = () => render(
+  <UserContext.Provider value={{ user }}><PaymentPage checkoutData={checkoutData} onNavigate={vi.fn()} /></UserContext.Provider>
+);
+const bodyOf = (call) => JSON.parse(call[1].body);
+
+describe('PaymentPage', () => {
+  test('shows the server total and sends only ids, quantities and the delivery choice', async () => {
+    fetchMock.mockImplementationOnce(() => json(200, { quote: quote(200000) }));
+    renderPage();
+    expect((await screen.findAllByText(/200\s?000/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^1\s?000/)).toBeNull();
+    const sent = bodyOf(fetchMock.mock.calls[0]);
+    expect(sent).toEqual({
+      mode: 'quote', userId: user.id,
+      items: [{ productId: P1, color: null, size: null, quantity: 2 }],
+      delivery: { courier: "O'zi olib ketish", pickupPointId: null, district: null, address: 'Yunusobod-19', fullName: 'Buyer', phone: '+998 90 000 00 00' },
+      useBonusPoints: false
+    });
+  });
+
+  test('pays the stored server total with the server order ids', async () => {
+    fetchMock
+      .mockImplementationOnce(() => json(200, { quote: quote(200000) }))
+      .mockImplementationOnce(() => json(201, { order: { orderNumber: 'ORD-1-2', paymeOrderId: '1795000000000123', ...quote(200000) } }));
+    renderPage();
+    await screen.findAllByText(/200\s?000/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /payme/i })); });
+    expect(bodyOf(fetchMock.mock.calls[1])).toMatchObject({ mode: 'create', expectedTotal: 200000 });
+    expect(m.payme).toHaveBeenCalledWith(expect.objectContaining({ orderId: '1795000000000123', amount: 200000, account: { order_id: '1795000000000123' } }));
+    expect(window.location.href).toBe('https://checkout.example/pay');
+  });
+
+  test('a changed total is shown to the buyer and nothing is paid', async () => {
+    fetchMock
+      .mockImplementationOnce(() => json(200, { quote: quote(200000) }))
+      .mockImplementationOnce(() => json(409, { error: 'TOTAL_MISMATCH', message: 'changed', quote: quote(210000) }));
+    renderPage();
+    await screen.findAllByText(/200\s?000/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /payme/i })); });
+    await waitFor(() => expect(screen.getAllByText(/210\s?000/).length).toBeGreaterThan(0));
+    expect(screen.getByRole('status')).toHaveTextContent('yangilandi');
+    expect(m.payme).not.toHaveBeenCalled();
+    expect(window.location.href).toBe('http://localhost/payment');
+  });
+
+  test('if the quote fails, an error is shown and paying is disabled', async () => {
+    fetchMock.mockImplementationOnce(() => json(400, { error: 'PRODUCT_UNAVAILABLE', message: 'Mahsulot mavjud emas' }));
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Mahsulot mavjud emas');
+    expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+  });
+});

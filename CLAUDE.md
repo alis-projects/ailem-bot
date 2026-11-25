@@ -298,6 +298,7 @@ https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://www.ailem.uz/api/supp
 | `/api/payme-webhook` | POST | Payme payment confirmation (updates order + inventory + bonus) |
 | `/api/click-webhook` | POST | Click payment callback |
 | `/api/payme-debug` | GET | Debug Payme integration |
+| `/api/orders` | POST | Customer checkout: server-side pricing (`src/lib/orderPricing.js`) + order insert (service role); `quote` / `create` with `expectedTotal` (409 on mismatch) |
 | `/api/create-invoice` | POST | Invoice generation |
 | `/api/admin/pickup-points` | GET/POST | Admin CRUD for pickup points |
 | `/api/admin/shipping-rates` | GET/POST | Admin CRUD for shipping rates |
