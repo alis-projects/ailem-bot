@@ -1,4 +1,4 @@
-import { useState, useContext, useMemo, useEffect } from 'react';
+import { useState, useContext, useMemo, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
 const ReactQuill = dynamic(() => import('react-quill'), { ssr: false });
 import 'react-quill/dist/quill.snow.css';
@@ -11,7 +11,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice } from '../../../utils/helpers';
 import { updateVariantStock, updateVariantImage, updateVariantPrice, getTotalVariantStock } from '../../../utils/variants';
-import { storageAPI, uzumClicksAPI } from '../../../services/api';
+import { productsAPI, storageAPI, uzumClicksAPI } from '../../../services/api';
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
@@ -67,6 +67,9 @@ const ProductsSection = () => {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [stockFilter, setStockFilter] = useState('');
   const [uzumStats, setUzumStats] = useState({});
+  // Full-record load for editing: idle | loading | ready | error
+  const [fullRecord, setFullRecord] = useState({ status: 'idle', error: null });
+  const editRequestRef = useRef(0);
 
   // Load UZUM click stats
   useEffect(() => {
@@ -267,6 +270,12 @@ const ProductsSection = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    // Never save an edit that did not start from the full database record
+    if (editingProduct && fullRecord.status !== 'ready') {
+      toast.error('Mahsulot to\'liq yuklanmadi. Saqlash mumkin emas.');
+      return;
+    }
+
     if (!validateForm()) {
       return;
     }
@@ -356,10 +365,7 @@ const ProductsSection = () => {
 
       toast.success(editingProduct ? 'Mahsulot yangilandi' : 'Mahsulot qo\'shildi');
 
-      setShowForm(false);
-      setEditingProduct(null);
-      setAllImages([]);
-      setFormErrors({});
+      closeForm();
 
       setFormData({
         name: '',
@@ -389,9 +395,42 @@ const ProductsSection = () => {
     }
   };
 
-  const handleEdit = (product) => {
+  // The catalog in AdminContext may be the "lightweight" one (no description,
+  // images, a_plus_content). Editing must start from the full database record,
+  // otherwise saving writes those fields back empty. Saving stays blocked until
+  // the full record has loaded.
+  const startEdit = async (product) => {
+    const requestId = ++editRequestRef.current;
     setEditingProduct(product);
-    const productImages = product.images || [product.image || product.imageUrl];
+    setFullRecord({ status: 'loading', error: null });
+    setFormErrors({});
+    setAllImages([]);
+    setShowForm(true);
+    try {
+      const full = await productsAPI.getById(product.id);
+      if (requestId !== editRequestRef.current) return; // another product was opened or the form was closed
+      if (!full || full.id !== product.id) throw new Error('Mahsulot topilmadi');
+      fillFormFromProduct(full);
+      setFullRecord({ status: 'ready', error: null });
+    } catch (error) {
+      if (requestId !== editRequestRef.current) return;
+      console.error('❌ Failed to load full product:', error);
+      setFullRecord({ status: 'error', error: error?.message || 'Noma\'lum xatolik' });
+    }
+  };
+
+  const closeForm = () => {
+    editRequestRef.current++; // ignore a full-record load that is still in flight
+    setShowForm(false);
+    setEditingProduct(null);
+    setAllImages([]);
+    setFormErrors({});
+    setFullRecord({ status: 'idle', error: null });
+  };
+
+  const fillFormFromProduct = (product) => {
+    setEditingProduct(product);
+    const productImages = product.images?.length ? product.images : [product.image || product.imageUrl];
     setAllImages(productImages.filter(url => url));
 
     let description = product.description || '';
@@ -429,7 +468,6 @@ const ProductsSection = () => {
       volume_pricing: product.volume_pricing || null,
       aPlusContent: product.aPlusContent || null
     });
-    setShowForm(true);
   };
 
   const handleDelete = async (productId) => {
@@ -682,11 +720,8 @@ const ProductsSection = () => {
             </h4>
             <button
               type="button"
-              onClick={() => {
-                setShowForm(false);
-                setEditingProduct(null);
-                setAllImages([]);
-              }}
+              onClick={closeForm}
+              aria-label="Yopish"
               className="a-faint"
               style={{ background: 'none', border: 'none', cursor: 'pointer' }}
             >
@@ -694,6 +729,31 @@ const ProductsSection = () => {
             </button>
           </div>
 
+          {editingProduct && fullRecord.status === 'loading' && (
+            <div role="status" className="a-muted text-sm py-8 text-center">
+              Mahsulot ma'lumotlari yuklanmoqda...
+            </div>
+          )}
+
+          {editingProduct && fullRecord.status === 'error' && (
+            <div role="alert" className="p-4 rounded-lg text-sm" style={{ background: 'var(--danger-weak)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+              <div className="flex items-center gap-2" style={{ fontWeight: 600 }}>
+                <AlertTriangle className="w-4 h-4" />
+                Mahsulotni to'liq yuklab bo'lmadi. Saqlash bloklandi.
+              </div>
+              <p className="mt-1">{fullRecord.error}</p>
+              <div className="flex gap-2 mt-3">
+                <button type="button" className="a-btn" onClick={() => startEdit(editingProduct)}>
+                  Qayta urinish
+                </button>
+                <button type="button" className="a-btn" onClick={closeForm}>
+                  Yopish
+                </button>
+              </div>
+            </div>
+          )}
+
+          {(!editingProduct || fullRecord.status === 'ready') && (
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Product Information */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1479,12 +1539,7 @@ const ProductsSection = () => {
               <button
                 type="button"
                 disabled={submitting}
-                onClick={() => {
-                  setShowForm(false);
-                  setEditingProduct(null);
-                  setAllImages([]);
-                  setFormErrors({});
-                }}
+                onClick={closeForm}
                 className={`a-btn ${submitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 style={{ padding: '10px 24px' }}
               >
@@ -1492,6 +1547,7 @@ const ProductsSection = () => {
               </button>
             </div>
           </form>
+          )}
         </div>
       )}
 
@@ -1659,7 +1715,7 @@ const ProductsSection = () => {
                         <Send className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => handleEdit(product)}
+                        onClick={() => startEdit(product)}
                         style={{ color: 'var(--accent)' }}
                         title="Tahrirlash"
                       >
