@@ -1143,6 +1143,14 @@ export const ordersAPI = {
   },
 
 
+  // Admin rejection in the database (add-admin-approve-order.sql): refuses
+  // orders that were already processed. Returns the function result object.
+  async rejectAsAdmin(ref) {
+    const { data, error } = await supabase.rpc('admin_reject_order', { p_ref: String(ref) });
+    if (error) throw error;
+    return data;
+  },
+
   // Update order status
   async updateStatus(id, status) {
     console.log('🔍 Updating order status. ID received:', id, 'Status:', status);

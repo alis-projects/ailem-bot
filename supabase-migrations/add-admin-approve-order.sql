@@ -29,6 +29,10 @@
 -- Payme PerformTransaction locks the same order row and refuses an order that
 -- is no longer pending/unfulfilled, so admin + Payme cannot fulfil twice.
 --
+-- ALSO: public.admin_reject_order(p_ref) and public.payme_cancel_transaction(...)
+-- (below) — a processed order is never turned into 'rejected' by the admin
+-- «Rad etish» button or by a late Payme cancel of an unperformed transaction.
+--
 -- Requires add-payment-fulfillment.sql and secure-admin-users.sql (is_admin).
 -- Idempotent. Apply BEFORE deploying the app version that calls it.
 -- ============================================================================
@@ -154,8 +158,94 @@ $$;
 REVOKE ALL ON FUNCTION public.admin_approve_order(text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.admin_approve_order(text) TO authenticated, service_role;
 
+-- ---------------------------------------------------------------- reject
+-- Admin «Rad etish»: only an order that is still pending and unfulfilled can
+-- be rejected. A processed order (paid by Payme/Click or approved by an admin)
+-- is refused with 'already_processed' and left exactly as it is — there is no
+-- return flow yet that would give back stock and bonuses. A held bonus
+-- reservation is released by the reservation trigger.
+-- result: rejected | already_processed | already_rejected | not_pending | not_found
+CREATE OR REPLACE FUNCTION public.admin_reject_order(p_ref text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+DECLARE
+  o public.orders%ROWTYPE;
+BEGIN
+  IF NOT public.is_admin() THEN
+    RAISE EXCEPTION 'admin_reject_order: admin only' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO o FROM public.orders
+  WHERE id = p_ref OR order_number = p_ref
+  ORDER BY (id = p_ref) DESC
+  LIMIT 1
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('result', 'not_found');
+  END IF;
+  IF o.fulfilled_at IS NOT NULL OR o.status IN ('approved', 'shipped', 'delivered', 'completed') THEN
+    RETURN jsonb_build_object('result', 'already_processed', 'status', o.status);
+  END IF;
+  IF o.status = 'rejected' THEN
+    RETURN jsonb_build_object('result', 'already_rejected', 'status', o.status);
+  END IF;
+  IF o.status IS DISTINCT FROM 'pending' THEN
+    RETURN jsonb_build_object('result', 'not_pending', 'status', o.status);
+  END IF;
+  UPDATE public.orders SET status = 'rejected' WHERE id = o.id;
+  RETURN jsonb_build_object('result', 'rejected', 'order_id', o.id, 'order_number', o.order_number);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.admin_reject_order(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_reject_order(text) TO authenticated, service_role;
+
+-- ---------------------------------------------------------------- Payme cancel
+-- CancelTransaction, under the order lock. Previously the route set
+-- status = 'rejected' for ANY order of the transaction. Now:
+--   * repeated cancel: answered with the stored state/time, nothing changes;
+--   * unperformed transaction (state 1) on an order that is still pending and
+--     unfulfilled: rejected as before (a held bonus reservation is released);
+--   * unperformed transaction on an order already processed another way
+--     (e.g. approved by an admin): only the transaction is marked cancelled,
+--     the order's status, stock and bonuses stay as they are;
+--   * performed transaction (state 2, i.e. a refund): unchanged behaviour
+--     (status rejected) — refunds are a separate task.
+-- result: cancelled | already_cancelled | transaction_not_found
+CREATE OR REPLACE FUNCTION public.payme_cancel_transaction(p_transaction_id text, p_time bigint, p_reason integer)
+RETURNS jsonb
+LANGUAGE plpgsql SET search_path = public, pg_temp
+AS $$
+DECLARE
+  o public.orders%ROWTYPE;
+BEGIN
+  SELECT * INTO o FROM public.orders WHERE payme_transaction_id = p_transaction_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('result', 'transaction_not_found');
+  END IF;
+  IF COALESCE(o.payme_state, 0) < 0 THEN
+    RETURN jsonb_build_object('result', 'already_cancelled', 'state', o.payme_state,
+                              'cancel_time', COALESCE(o.payme_cancel_time, p_time));
+  END IF;
+  IF COALESCE(o.payme_state, 0) = 1 AND (o.fulfilled_at IS NOT NULL OR o.status IS DISTINCT FROM 'pending') THEN
+    UPDATE public.orders
+    SET payme_state = -1, payme_cancel_time = p_time, payme_cancel_reason = p_reason
+    WHERE id = o.id;
+    RETURN jsonb_build_object('result', 'cancelled', 'state', -1, 'cancel_time', p_time, 'order_status_kept', o.status);
+  END IF;
+  UPDATE public.orders
+  SET status = 'rejected', payme_state = -1, payme_cancel_time = p_time, payme_cancel_reason = p_reason
+  WHERE id = o.id;
+  RETURN jsonb_build_object('result', 'cancelled', 'state', -1, 'cancel_time', p_time);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.payme_cancel_transaction(text, bigint, integer) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.payme_cancel_transaction(text, bigint, integer) TO service_role;
+
 COMMIT;
 
 -- POST-CHECK (read-only):
---   SELECT has_function_privilege('anon', 'public.admin_approve_order(text)', 'EXECUTE'),           -- f
---          has_function_privilege('authenticated', 'public.admin_approve_order(text)', 'EXECUTE');  -- t (is_admin() checked inside)
+--   SELECT has_function_privilege('anon', 'public.admin_approve_order(text)', 'EXECUTE'),                       -- f
+--          has_function_privilege('authenticated', 'public.admin_approve_order(text)', 'EXECUTE'),              -- t (is_admin() inside)
+--          has_function_privilege('anon', 'public.admin_reject_order(text)', 'EXECUTE'),                        -- f
+--          has_function_privilege('authenticated', 'public.payme_cancel_transaction(text,bigint,integer)', 'EXECUTE'), -- f
+--          has_function_privilege('service_role', 'public.payme_cancel_transaction(text,bigint,integer)', 'EXECUTE');  -- t

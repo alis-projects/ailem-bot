@@ -166,10 +166,92 @@ describe.skipIf(!enabled)('local stack: admin_approve_order', () => {
     console.log('admin+Payme outcomes:', outcomes.join(', '));
   });
 
+  const reject = async (ref) => {
+    const { data, error } = await admin.rpc('admin_reject_order', { p_ref: ref });
+    if (error) throw error;
+    return data;
+  };
+  const snapshot = async (n) => {
+    const r = await row(n);
+    return { status: r.status, fulfilled: r.fulfilled_at !== null, reservation: r.bonus_reservation, stock: (await product(simpleId)).stock, bonus: await balance() };
+  };
+  // Pending order holding a bonus reservation, created like /api/orders does
+  const reservedOrder = async (points) => {
+    await service.from('users').update({ bonus_points: points }).eq('id', buyerId);
+    const n = `${tag}-r${orderNumbers.length + 1}`;
+    orderNumbers.push(n);
+    const payme_order_id = `${Date.now()}${String(orderNumbers.length).padStart(3, '0')}`;
+    const { data, error } = await service.rpc('create_customer_order', { p_order: {
+      id: crypto.randomUUID(), order_number: n, user_id: buyerId, user_name: 'Approve Test', user_phone: '+998900000000',
+      items: [{ productId: simpleId, quantity: 1 }], delivery_info: { type: 'self_pickup' }, subtotal: 50000, delivery_fee: 0,
+      bonus_points_used: points, bonus_discount: points, total: 50000 - points, status: 'pending', payme_order_id
+    } });
+    if (error) throw error;
+    expect(data.result).toBe('created');
+    return { n, payme_order_id, total: 50000 - points };
+  };
+
+  test('case 1 — manual approval, then a late Payme cancel of the unperformed transaction: order unchanged', async () => {
+    await service.from('products').update({ stock: 20 }).eq('id', simpleId);
+    const o = await reservedOrder(3000);
+    const tx = `${tag}-late`;
+    expect((await payme('CreateTransaction', { id: tx, time: Date.now(), amount: o.total * 100, account: { order_id: o.payme_order_id } })).result?.state).toBe(1);
+    expect((await approve(o.n)).result).toBe('approved');
+    const afterApprove = await snapshot(o.n);
+    expect(afterApprove).toMatchObject({ status: 'approved', fulfilled: true, reservation: 'spent', stock: 19 });
+
+    const c1 = await payme('CancelTransaction', { id: tx, reason: 4 });
+    const c2 = await payme('CancelTransaction', { id: tx, reason: 4 });
+    expect(c1.result).toMatchObject({ transaction: tx, state: -1 });
+    expect(c2.result.cancel_time).toBe(c1.result.cancel_time);   // repeated cancel: same answer
+    expect(await snapshot(o.n)).toEqual(afterApprove);            // status, stock, bonus, reservation unchanged
+    expect((await row(o.n)).payme_state).toBe(-1);                 // the transaction itself is cancelled
+  });
+
+  test('case 2 — rejecting an already processed order is refused; nothing changes', async () => {
+    // approved by an admin
+    const a = await order([{ productId: simpleId, quantity: 1 }], { total: 50000 });
+    expect((await approve(a.n)).result).toBe('approved');
+    const beforeA = await snapshot(a.n);
+    expect(await reject(a.n)).toEqual({ result: 'already_processed', status: 'approved' });
+    expect(await snapshot(a.n)).toEqual(beforeA);
+    // paid through Payme
+    const b = await reservedOrder(2000);
+    const tx = `${tag}-paid`;
+    await payme('CreateTransaction', { id: tx, time: Date.now(), amount: b.total * 100, account: { order_id: b.payme_order_id } });
+    expect((await payme('PerformTransaction', { id: tx })).result?.state).toBe(2);
+    const beforeB = await snapshot(b.n);
+    expect((await reject(b.n)).result).toBe('already_processed');
+    expect(await snapshot(b.n)).toEqual(beforeB);
+    // shipped
+    await admin.from('orders').update({ status: 'shipped' }).eq('order_number', a.n);
+    expect(await reject(a.n)).toEqual({ result: 'already_processed', status: 'shipped' });
+  });
+
+  test('case 3 — ordinary cancellation of an unpaid order works as before (reservation released once)', async () => {
+    // Payme cancels an unperformed transaction of a pending order
+    const o = await reservedOrder(4000);
+    const stock = (await product(simpleId)).stock;
+    expect(await balance()).toBe(0);
+    const tx = `${tag}-unpaid`;
+    await payme('CreateTransaction', { id: tx, time: Date.now(), amount: o.total * 100, account: { order_id: o.payme_order_id } });
+    expect((await payme('CancelTransaction', { id: tx, reason: 3 })).result?.state).toBe(-1);
+    expect(await snapshot(o.n)).toMatchObject({ status: 'rejected', fulfilled: false, reservation: 'released', stock, bonus: 4000 });
+    expect((await payme('CancelTransaction', { id: tx, reason: 3 })).result?.state).toBe(-1);
+    expect(await balance()).toBe(4000);
+    // admin rejects a pending order (twice)
+    const p = await reservedOrder(1500);
+    expect((await reject(p.n)).result).toBe('rejected');
+    expect((await reject(p.n)).result).toBe('already_rejected');
+    expect(await snapshot(p.n)).toMatchObject({ status: 'rejected', reservation: 'released', stock, bonus: 1500 });
+  });
+
   test('only admins may call it', async () => {
     const o = await order([{ productId: simpleId, quantity: 1 }], { total: 50000 });
     const { error } = await anon.rpc('admin_approve_order', { p_ref: o.n });
     expect(error).not.toBeNull();
+    expect((await anon.rpc('admin_reject_order', { p_ref: o.n })).error).not.toBeNull();
+    expect((await anon.rpc('payme_cancel_transaction', { p_transaction_id: 'x', p_time: 1, p_reason: 1 })).error).not.toBeNull();
     expect((await row(o.n)).status).toBe('pending');
   });
 });
