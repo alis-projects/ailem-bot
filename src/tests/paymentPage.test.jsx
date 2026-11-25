@@ -12,7 +12,7 @@ vi.mock('../services/payme', () => ({ generatePaymeLink: m.payme }));
 vi.mock('../lib/supabase', () => ({ supabase: {} }));
 
 const P1 = '00000000-0000-4000-8000-000000000001';
-const user = { id: '00000000-0000-4000-8000-0000000000a1', name: 'Buyer', phone: '+998900000000' };
+const user = { id: '00000000-0000-4000-8000-0000000000a1', telegramId: '555', name: 'Buyer', phone: '+998900000000', isGuest: false };
 // Client-side numbers deliberately wrong: they must not be shown or charged
 const checkoutData = {
   fullName: 'Buyer', phone: '+998 90 000 00 00', courier: "O'zi olib ketish", type: 'self_pickup',
@@ -31,8 +31,8 @@ beforeEach(() => {
   window.location = { href: 'http://localhost/payment' };
 });
 
-const renderPage = () => render(
-  <UserContext.Provider value={{ user }}><PaymentPage checkoutData={checkoutData} onNavigate={vi.fn()} /></UserContext.Provider>
+const renderPage = (u = user, onNavigate = vi.fn()) => render(
+  <UserContext.Provider value={{ user: u }}><PaymentPage checkoutData={checkoutData} onNavigate={onNavigate} /></UserContext.Provider>
 );
 const bodyOf = (call) => JSON.parse(call[1].body);
 
@@ -44,7 +44,7 @@ describe('PaymentPage', () => {
     expect(screen.queryByText(/^1\s?000/)).toBeNull();
     const sent = bodyOf(fetchMock.mock.calls[0]);
     expect(sent).toEqual({
-      mode: 'quote', userId: user.id,
+      mode: 'quote', account: 'user',
       items: [{ productId: P1, color: null, size: null, quantity: 2 }],
       delivery: { courier: "O'zi olib ketish", pickupPointId: null, district: null, address: 'Yunusobod-19', fullName: 'Buyer', phone: '+998 90 000 00 00' },
       useBonusPoints: false
@@ -81,5 +81,24 @@ describe('PaymentPage', () => {
     renderPage();
     expect(await screen.findByRole('alert')).toHaveTextContent('Mahsulot mavjud emas');
     expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+  });
+
+  test('a guest sends account guest and no user id', async () => {
+    fetchMock.mockImplementationOnce(() => json(200, { quote: quote(200000) }));
+    renderPage({ id: 'guest-1', isGuest: true, name: 'Mehmon' });
+    await screen.findAllByText(/200\s?000/);
+    const sent = bodyOf(fetchMock.mock.calls[0]);
+    expect(sent.account).toBe('guest');
+    expect(sent).not.toHaveProperty('userId');
+  });
+
+  test('an expired session asks the buyer to sign in again and blocks paying', async () => {
+    const onNavigate = vi.fn();
+    fetchMock.mockImplementationOnce(() => json(401, { error: 'SESSION_REQUIRED', message: 'Sessiya muddati tugagan' }));
+    renderPage(user, onNavigate);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sessiya muddati tugagan');
+    expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Telegram orqali kirish' }));
+    expect(onNavigate).toHaveBeenCalledWith('login');
   });
 });

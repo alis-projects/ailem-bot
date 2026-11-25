@@ -911,9 +911,11 @@ export const checkoutAPI = {
 };
 
 // Build the checkout request from cart items and checkout form data
+// account: 'user' for a signed-in customer — the server takes the identity
+// from the httpOnly session cookie, never from an id in this request.
 export function buildCheckoutRequest(user, cartItems, checkoutData) {
   return {
-    userId: user?.id,
+    account: user && !user.isGuest && user.telegramId ? 'user' : 'guest',
     items: (cartItems || []).map(item => ({
       productId: item.id,
       color: item.selectedColor || null,

@@ -28,26 +28,35 @@ vi.mock('../lib/supabase-server', () => ({
   })
 }));
 
-import { POST } from '../../app/api/orders/route';
+import { GET, POST } from '../../app/api/orders/route';
+import { SESSION_COOKIE, signSession } from '../lib/customerSession';
+
+const SECRET = 'test-secret-'.padEnd(48, 'x');
+process.env.CUSTOMER_SESSION_SECRET = SECRET;
+process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://127.0.0.1:1';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
+const OTHER = '00000000-0000-4000-8000-0000000000b2';
+const sessionFor = (uid, tid, secret = SECRET, now) => `${SESSION_COOKIE}=${signSession({ uid, tid }, secret, now)}`;
+const MY_SESSION = () => sessionFor(USER, '555');
 const P1 = '00000000-0000-4000-8000-000000000001';
 const P2 = '00000000-0000-4000-8000-000000000002';
 const P3 = '00000000-0000-4000-8000-000000000003';
 let ip = 0;
 
-const post = async (body) => {
+const post = async (body, cookie = MY_SESSION()) => {
   const res = await POST(new Request('http://localhost/api/orders', {
     method: 'POST',
     // a different client per request keeps the rate limiter out of the way
-    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': `10.0.0.${++ip}` },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': `10.0.0.${++ip}`, ...(cookie ? { cookie } : {}) },
     body: typeof body === 'string' ? body : JSON.stringify(body)
   }));
   return { status: res.status, json: await res.json() };
 };
 
 const request = (over = {}) => ({
-  userId: USER,
+  account: 'user',
   items: [{ productId: P1, quantity: 2 }],
   delivery: { courier: "O'zi olib ketish", fullName: 'Test Xaridor', phone: '+998 90 000 00 00' },
   useBonusPoints: false,
@@ -69,7 +78,10 @@ beforeEach(() => {
     ],
     shipping_rates: [{ courier: 'UzPost', state: 'Samarqand viloyat', first_kg: 15000, additional_kg: 3000, payment_type: 'prepaid' }],
     app_settings: [{ id: 1, bonus_config: { purchaseBonus: 1 } }],
-    users: [{ id: USER, name: 'DB Name', phone: '+998900000000', telegram_id: 555, bonus_points: 15000 }],
+    users: [
+      { id: USER, name: 'DB Name', phone: '+998900000000', telegram_id: 555, bonus_points: 15000 },
+      { id: OTHER, name: 'Other', phone: '+998911111111', telegram_id: 777, bonus_points: 900000 }
+    ],
     orders: []
   };
 });
@@ -137,8 +149,8 @@ describe('POST /api/orders', () => {
   test('refuses hidden products, unknown users, inactive or mismatched pickup points and bad bodies', async () => {
     const cases = [
       [{ ...request({ items: [{ productId: P3, quantity: 1 }] }), mode: 'quote' }, 'PRODUCT_UNAVAILABLE'],
-      [{ ...request({ userId: '00000000-0000-4000-8000-0000000000ff' }), mode: 'quote' }, 'BAD_USER'],
-      [{ ...request({ userId: 'admin' }), mode: 'quote' }, 'BAD_USER'],
+      [{ ...request({ account: 'admin' }), mode: 'quote' }, 'BAD_REQUEST'],
+      [{ ...request({ account: undefined }), mode: 'quote' }, 'BAD_REQUEST'],
       [{ ...request({ delivery: { courier: 'UzPost', pickupPointId: 8, fullName: 'A', phone: '1' } }), mode: 'quote' }, 'BAD_DELIVERY'],
       [{ ...request({ delivery: { courier: 'EMU', pickupPointId: 7, fullName: 'A', phone: '1' } }), mode: 'quote' }, 'BAD_DELIVERY'],
       [{ ...request({ delivery: { courier: 'Yandex', district: 'Nowhere', address: 'x', fullName: 'A', phone: '1' } }), mode: 'quote' }, 'BAD_DELIVERY'],
@@ -152,10 +164,49 @@ describe('POST /api/orders', () => {
     expect(m.db.orders).toHaveLength(0);
   });
 
-  test('guest buyers can order but get no bonus', async () => {
-    const r = await post({ ...request({ userId: 'guest-1795600000000', useBonusPoints: true }), mode: 'quote' });
-    expect(r.status).toBe(200);
-    expect(r.json.quote).toMatchObject({ bonusPointsUsed: 0, total: 200000 });
+  test('guest order: no bonus discount and a server-generated guest id, even with ids or a session in the request', async () => {
+    const body = { ...request({ account: 'guest', userId: USER, useBonusPoints: true }), mode: 'create', expectedTotal: 200000 };
+    const r = await post(body, null);
+    expect(r.status).toBe(201);
+    const o = m.db.orders[0];
+    expect(o.user_id).toMatch(/^guest-[0-9a-f-]{36}$/);
+    expect(o).toMatchObject({ bonus_points_used: 0, bonus_discount: 0, total: 200000, user_telegram_id: null, user_name: 'Test Xaridor' });
+  });
+
+  test('account user requires a valid session: none, forged, expired or stale sessions are refused', async () => {
+    const cases = [
+      null,
+      `${SESSION_COOKIE}=garbage`,
+      sessionFor(USER, '555', 'another-secret-'.padEnd(48, 'y')),
+      sessionFor(USER, '555', SECRET, Date.now() - 31 * 24 * 3600 * 1000),
+      sessionFor(USER, '999'),                                  // Telegram id no longer matches the row
+      sessionFor('00000000-0000-4000-8000-0000000000ff', '1')  // user row does not exist
+    ];
+    for (const cookie of cases) {
+      const r = await post({ ...request(), mode: 'create', expectedTotal: 200000 }, cookie);
+      expect([r.status, r.json.error]).toEqual([401, 'SESSION_REQUIRED']);
+    }
+    expect(m.db.orders).toHaveLength(0);
+  });
+
+  test("another user's balance cannot be used: the id in the body is ignored, the session decides", async () => {
+    const req = request({ userId: OTHER, user_id: OTHER, useBonusPoints: true });
+    const quote = (await post({ ...req, mode: 'quote' })).json.quote;
+    // own balance 15 000 (20% cap would allow 40 000); OTHER has 900 000
+    expect(quote).toMatchObject({ account: 'user', bonusPointsUsed: 15000, total: 185000 });
+    const r = await post({ ...req, mode: 'create', expectedTotal: 185000 });
+    expect(r.status).toBe(201);
+    expect(m.db.orders[0]).toMatchObject({ user_id: USER, user_telegram_id: '555', bonus_points_used: 15000 });
+  });
+
+  test('the signed-in buyer spends only their own balance; OTHER with their own session spends theirs', async () => {
+    const r = await post({ ...request({ useBonusPoints: true }), mode: 'quote' }, sessionFor(OTHER, '777'));
+    expect(r.json.quote).toMatchObject({ bonusPointsUsed: 40000, bonusDiscount: 40000, total: 160000 });
+  });
+
+  test('GET reports configuration presence only', async () => {
+    const res = await GET();
+    expect(await res.json()).toEqual({ ok: true, serviceRole: true, sessionSecret: true });
   });
 
   test('a failed insert is reported as an error', async () => {

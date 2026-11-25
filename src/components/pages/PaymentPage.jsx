@@ -17,14 +17,20 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
   const [quote, setQuote] = useState(null);
   const [quoteError, setQuoteError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [sessionRequired, setSessionRequired] = useState(false);
 
   useEffect(() => {
     if (!checkoutData || !user?.id || cartItems.length === 0) return;
     let cancelled = false;
     setQuoteError(null);
     checkoutAPI.quote(buildCheckoutRequest(user, cartItems, checkoutData))
-      .then(q => { if (!cancelled) setQuote(q); })
-      .catch(e => { if (!cancelled) { setQuote(null); setQuoteError(e.message || 'Xatolik'); } });
+      .then(q => { if (!cancelled) { setQuote(q); setSessionRequired(false); } })
+      .catch(e => {
+        if (cancelled) return;
+        setQuote(null);
+        setSessionRequired(e.code === 'SESSION_REQUIRED');
+        setQuoteError(e.message || 'Xatolik');
+      });
     return () => { cancelled = true; };
   }, [checkoutData, cartItems, user]);
 
@@ -61,6 +67,12 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
       try {
         order = await checkoutAPI.create(buildCheckoutRequest(user, cartItems, checkoutData), quote.total);
       } catch (e) {
+        if (e.code === 'SESSION_REQUIRED') {
+          setQuote(null);
+          setSessionRequired(true);
+          setQuoteError(e.message);
+          return;
+        }
         if (e.code === 'TOTAL_MISMATCH' && e.quote) {
           setQuote(e.quote);
           setNotice("Buyurtma summasi yangilandi. Yangi summani tekshirib, qayta to'lang.");
@@ -136,6 +148,11 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
         {quoteError && (
           <div role="alert" className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
             Buyurtmani hisoblab bo'lmadi: {quoteError}
+            {sessionRequired && (
+              <button type="button" onClick={() => onNavigate('login')} className="block mt-2 font-semibold underline">
+                Telegram orqali kirish
+              </button>
+            )}
           </div>
         )}
         {notice && (

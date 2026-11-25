@@ -7,22 +7,31 @@
 // src/lib/orderPricing.js and stores those amounts. payme_create_transaction
 // later checks Payme's amount against this stored total.
 //
-//   POST { mode: 'quote',  ...request }  -> 200 { quote }
-//   POST { mode: 'create', ...request, expectedTotal }
+//   POST { mode: 'quote',  account, ...request }  -> 200 { quote }
+//   POST { mode: 'create', account, ...request, expectedTotal }
 //        -> 201 { order }   when expectedTotal equals the server total
 //        -> 409 { error: 'TOTAL_MISMATCH', quote }  otherwise (nothing stored)
+//   GET  -> { ok, serviceRole, sessionSecret }  configuration health (no values)
+//
+// WHO is buying never comes from the request body. account: 'user' requires
+// the server-verified session cookie (src/lib/customerSession.js, issued by
+// /api/auth/telegram-login): the order and the bonus balance belong to that
+// session's user, or the request is refused with 401 SESSION_REQUIRED.
+// account: 'guest' places an order with a server-generated guest id, no
+// account link and no bonus discount.
 import { NextResponse } from 'next/server';
 import { randomInt, randomUUID } from 'crypto';
 import { createServerSupabaseClient } from '../../../src/lib/supabase-server';
 import { rateLimit } from '../../../src/lib/rate-limit';
 import { priceOrder, PricingError, SELF_PICKUP_COURIER, MAX_LINES } from '../../../src/lib/orderPricing';
+import { getSessionSecret, getSessionUser } from '../../../src/lib/customerSession';
 
 export const dynamic = 'force-dynamic';
 
 const SELF_PICKUP_ADDRESS = 'Yunusobod-19, 44 dom, Toshkent';
 const TASHKENT_DISTRICTS = ['Bektemir', 'Chilonzor', 'Mirobod', "Mirzo Ulug'bek", 'Sergeli', 'Shayxontohur', 'Uchtepa', 'Yashnobod', 'Yakkasaroy', 'Yunusobod', 'Olmazor'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const GUEST_RE = /^guest-\d{1,20}$/;
+const STATUS_BY_CODE = { SESSION_REQUIRED: 401 };
 
 const bad = (code, message, status = 400, extra = {}) => NextResponse.json({ error: code, message, ...extra }, { status });
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -80,37 +89,41 @@ function parseLines(items) {
   }));
 }
 
-async function loadAndPrice(supabase, body) {
-  const userId = str(body?.userId, 100);
-  if (!UUID_RE.test(userId) && !GUEST_RE.test(userId)) throw new PricingError('BAD_USER', 'Foydalanuvchi aniqlanmadi');
+async function loadAndPrice(request, supabase, body) {
+  const account = body?.account;
+  if (account !== 'user' && account !== 'guest') throw new PricingError('BAD_REQUEST', "Noto'g'ri so'rov");
+  // Identity from the verified session only; ids in the body are ignored
+  const user = account === 'user' ? await getSessionUser(request, supabase) : null;
+  if (account === 'user' && !user) {
+    throw new PricingError('SESSION_REQUIRED', 'Sessiya muddati tugagan. Iltimos, Telegram orqali qayta kiring');
+  }
 
   const lines = parseLines(body?.items);
   const delivery = await resolveDelivery(supabase, body?.delivery);
   const ids = [...new Set(lines.map(l => l.productId).filter(Boolean))];
 
-  const [productsRes, ratesRes, settingsRes, userRes] = await Promise.all([
+  const [productsRes, ratesRes, settingsRes] = await Promise.all([
     ids.length
       ? supabase.from('products').select('id, name, price, visible, variants, volume_pricing, weight, image').in('id', ids)
       : Promise.resolve({ data: [], error: null }),
     supabase.from('shipping_rates').select('courier, state, first_kg, additional_kg, payment_type').eq('courier', delivery.pricing.courier),
-    supabase.from('app_settings').select('bonus_config').eq('id', 1).maybeSingle(),
-    UUID_RE.test(userId)
-      ? supabase.from('users').select('id, name, phone, telegram_id, bonus_points').eq('id', userId).maybeSingle()
-      : Promise.resolve({ data: null, error: null })
+    supabase.from('app_settings').select('bonus_config').eq('id', 1).maybeSingle()
   ]);
-  for (const r of [productsRes, ratesRes, settingsRes, userRes]) if (r.error) throw r.error;
-  if (UUID_RE.test(userId) && !userRes.data) throw new PricingError('BAD_USER', 'Foydalanuvchi topilmadi');
+  for (const r of [productsRes, ratesRes, settingsRes]) if (r.error) throw r.error;
 
   const quote = priceOrder({
     lines,
     products: productsRes.data,
     shippingRates: ratesRes.data,
     bonusConfig: settingsRes.data?.bonus_config || null,
-    bonusBalance: userRes.data?.bonus_points || 0,
-    useBonusPoints: body?.useBonusPoints === true,
+    // Guests never get a bonus discount; a user only spends their own balance
+    bonusBalance: user ? user.bonus_points || 0 : 0,
+    useBonusPoints: user ? body?.useBonusPoints === true : false,
     delivery: delivery.pricing
   });
-  return { userId, user: userRes.data, delivery, quote };
+  // Guest orders get a server-generated id: no account link from the request
+  const userId = user ? user.id : `guest-${randomUUID()}`;
+  return { userId, user, delivery, quote, account };
 }
 
 const publicQuote = (q) => ({
@@ -141,15 +154,15 @@ export async function POST(request) {
 
   let priced;
   try {
-    priced = await loadAndPrice(supabase, body);
+    priced = await loadAndPrice(request, supabase, body);
   } catch (e) {
-    if (e instanceof PricingError) return bad(e.code, e.message, 400, e.details ? { details: e.details } : {});
+    if (e instanceof PricingError) return bad(e.code, e.message, STATUS_BY_CODE[e.code] || 400, e.details ? { details: e.details } : {});
     console.error('orders: pricing failed', e);
     return bad('SERVER_ERROR', "Buyurtmani hisoblab bo'lmadi", 500);
   }
   const { userId, user, delivery, quote } = priced;
 
-  if (mode === 'quote') return NextResponse.json({ quote: publicQuote(quote) });
+  if (mode === 'quote') return NextResponse.json({ quote: { ...publicQuote(quote), account: priced.account } });
 
   // The buyer must have seen exactly the amount that will be charged
   const expected = Number(body?.expectedTotal);
@@ -187,4 +200,18 @@ export async function POST(request) {
     return bad('SERVER_ERROR', "Buyurtmani saqlab bo'lmadi", 500);
   }
   return NextResponse.json({ order: { orderNumber, paymeOrderId, ...publicQuote(quote) } }, { status: 201 });
+}
+
+// Configuration health for the release runbook: reports only whether the
+// required server settings are present, never their values.
+export async function GET() {
+  let serviceRole = false;
+  try {
+    createServerSupabaseClient();
+    serviceRole = true;
+  } catch {
+    serviceRole = false;
+  }
+  const sessionSecret = getSessionSecret() !== null;
+  return NextResponse.json({ ok: serviceRole && sessionSecret, serviceRole, sessionSecret }, { status: serviceRole && sessionSecret ? 200 : 503 });
 }
