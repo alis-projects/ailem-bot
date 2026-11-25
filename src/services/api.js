@@ -1134,6 +1134,23 @@ export const ordersAPI = {
     return this._mapOrderFromDB({ ...dbOrder, created_at: new Date().toISOString() });
   },
 
+  // Admin approval in one DB transaction (supabase-migrations/add-admin-approve-order.sql).
+  // ref: order UUID or order number. Returns the function result object.
+  async approveAsAdmin(ref) {
+    const { data, error } = await supabase.rpc('admin_approve_order', { p_ref: String(ref) });
+    if (error) throw error;
+    return data;
+  },
+
+
+  // Admin rejection in the database (add-admin-approve-order.sql): refuses
+  // orders that were already processed. Returns the function result object.
+  async rejectAsAdmin(ref) {
+    const { data, error } = await supabase.rpc('admin_reject_order', { p_ref: String(ref) });
+    if (error) throw error;
+    return data;
+  },
+
   // Update order status
   async updateStatus(id, status) {
     console.log('🔍 Updating order status. ID received:', id, 'Status:', status);

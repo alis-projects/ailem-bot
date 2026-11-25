@@ -6,15 +6,14 @@ import {
 import { AdminContext } from '../../../context/AdminContext';
 import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
-import { formatPrice, formatDate, loadFromLocalStorage, getStatusLabel } from '../../../utils/helpers';
+import { formatPrice, formatDate, getStatusLabel } from '../../../utils/helpers';
 import { exportOrders, exportOrderItems } from '../../../utils/csvExport';
 import { notifyUserOrderStatus, notifyReferrerReward } from '../../../services/telegram';
 import { printShippingLabel, printMultipleLabels } from '../../../utils/shippingLabel';
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
-import { usersAPI } from '../../../services/api';
 
 const OrdersSection = ({ onImageClick }) => {
-  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, updateUserBonusPoints } = useContext(AdminContext);
+  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState('all');
@@ -61,6 +60,30 @@ const OrdersSection = ({ onImageClick }) => {
     return 'a-pill-info';
   };
 
+  // Readable reason when the database refused an approval (nothing changed)
+  const approveErrorMessage = (error) => {
+    if (error?.code === 'insufficient_stock') {
+      const list = (error.items || []).map(i =>
+        `${i.name || i.productId}${i.color ? ` (${i.color}${i.size ? ` / ${i.size}` : ''})` : ''}: ${i.available ?? 0} / ${i.requested ?? '?'}`
+      ).join('; ');
+      return `Omborda yetarli mahsulot yo'q, buyurtma o'zgartirilmadi. ${list}`;
+    }
+    if (error?.code === 'already_fulfilled' || error?.code === 'not_pending') {
+      return `Buyurtma allaqachon qayta ishlangan (${error.status ? getStatusLabel(error.status) : 'holat o\'zgargan'}). Ro'yxatni yangilang.`;
+    }
+    return 'Buyurtmani tasdiqlashda xatolik. Qayta urinib ko\'ring.';
+  };
+
+  // An already processed order cannot be rejected until a return flow exists
+  const rejectErrorMessage = (error) => {
+    if (error?.code === 'already_processed') {
+      return `Buyurtma allaqachon qayta ishlangan (${error.status ? getStatusLabel(error.status) : 'to\'langan'}), uni rad etib bo'lmaydi: mahsulot va bonuslarni qaytarish hali qo'llab-quvvatlanmaydi. Holat o'zgartirilmadi.`;
+    }
+    if (error?.code === 'already_rejected') return 'Buyurtma allaqachon rad etilgan.';
+    if (error?.code === 'not_pending') return `Buyurtma holati: ${getStatusLabel(error.status)}. Rad etib bo'lmaydi.`;
+    return 'Buyurtmani rad etishda xatolik. Qayta urinib ko\'ring.';
+  };
+
   const handleApprove = async (orderId) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
@@ -75,48 +98,20 @@ const OrdersSection = ({ onImageClick }) => {
 
     if (confirmed) {
       try {
-        await approveOrder(orderId);
+        // Stock, bonuses and status are applied by the database in one
+        // transaction (admin_approve_order); the customer is notified there too.
+        const { referrer } = await approveOrder(orderId);
         toast.success('Buyurtma muvaffaqiyatli tasdiqlandi');
-
-        if (order.userId) {
+        if (referrer?.telegram_id && referrer.commission > 0) {
           try {
-            const bonusConfig = loadFromLocalStorage('bonusConfig', { purchaseBonus: 1, referralCommission: 3 });
-            const purchaseBonusPercentage = bonusConfig?.purchaseBonus || 1;
-            const purchaseBonusPoints = Math.round(((order.subtotal || order.total) * purchaseBonusPercentage) / 100);
-
-            // Deduct bonus points that were used in this order
-            if (order.bonusPointsUsed > 0) {
-              await updateUserBonusPoints(order.userId, -order.bonusPointsUsed);
-            }
-
-            await updateUserBonusPoints(order.userId, purchaseBonusPoints);
-
-            const customer = await usersAPI.getById(order.userId);
-            if (customer && customer.referred_by) {
-              const referrer = await usersAPI.getByReferralCode(customer.referred_by);
-              if (referrer) {
-                const commissionPercentage = bonusConfig?.referralCommission || 3;
-                const commissionAmount = Math.round(((order.subtotal || order.total) * commissionPercentage) / 100);
-                const newReferrals = (referrer.referrals || 0) + 1;
-                const newBonusPoints = (referrer.bonus_points || 0) + commissionAmount;
-
-                await usersAPI.update(referrer.id, {
-                  referrals: newReferrals,
-                  bonus_points: newBonusPoints
-                });
-
-                await notifyReferrerReward(referrer, commissionAmount, newReferrals);
-              }
-            }
-          } catch (bonusError) {
-            console.error('❌ Failed to award bonus points:', bonusError);
+            await notifyReferrerReward(referrer, referrer.commission, referrer.referrals || 0);
+          } catch (notifyError) {
+            console.error('❌ Failed to notify referrer:', notifyError);
           }
         }
-
-        await notifyUserOrderStatus(order, 'approved');
       } catch (error) {
         console.error('❌ Failed to approve order:', error);
-        toast.error('Buyurtmani tasdiqlashda xatolik. Qayta urinib ko\'ring.');
+        toast.error(approveErrorMessage(error));
       }
     }
   };
@@ -127,7 +122,7 @@ const OrdersSection = ({ onImageClick }) => {
 
     const confirmed = await confirm({
       title: 'Buyurtmani rad etish',
-      message: 'Buyurtmani rad etmoqchimisiz? Agar avval tasdiqlangan bo\'lsa, mahsulotlar qaytariladi va bonus ballar olib tashlanadi.',
+      message: 'Buyurtmani rad etmoqchimisiz? Faqat hali qayta ishlanmagan (to\'lanmagan va tasdiqlanmagan) buyurtmani rad etish mumkin.',
       type: 'danger',
       confirmText: 'Rad etish',
       cancelText: 'Bekor qilish'
@@ -135,26 +130,13 @@ const OrdersSection = ({ onImageClick }) => {
 
     if (confirmed) {
       try {
-        const wasApproved = order.status === 'approved';
-        const bonusConfig = loadFromLocalStorage('bonusConfig', { purchaseBonus: 1 });
-        const bonusPercentage = bonusConfig?.purchaseBonus || 1;
-        const earnedPoints = Math.round(((order.subtotal || order.total) * bonusPercentage) / 100);
-
-        await rejectOrder(orderId, async (rejectedOrder) => {
-          if (wasApproved && rejectedOrder.userId && earnedPoints > 0) {
-            try {
-              await updateUserBonusPoints(rejectedOrder.userId, -earnedPoints);
-            } catch (err) {
-              console.error('Failed to refund bonus points:', err);
-            }
-          }
-        });
-
-        await notifyUserOrderStatus(order, 'rejected');
+        // Decided in the database (admin_reject_order); the customer is
+        // notified by rejectOrder. Processed orders are refused, see below.
+        await rejectOrder(orderId);
         toast.success('Buyurtma rad etildi');
       } catch (error) {
         console.error('❌ Failed to reject order:', error);
-        toast.error('Buyurtmani rad etishda xatolik. Qayta urinib ko\'ring.');
+        toast.error(rejectErrorMessage(error));
       }
     }
   };
@@ -300,19 +282,7 @@ const OrdersSection = ({ onImageClick }) => {
               break;
             case 'Reject':
               if (order.status === 'pending') {
-                const wasApproved = order.status === 'approved';
-                const bConfig = loadFromLocalStorage('bonusConfig', { purchaseBonus: 1 });
-                const bPercentage = bConfig?.purchaseBonus || 1;
-                const earned = Math.round(((order.subtotal || order.total) * bPercentage) / 100);
-                await rejectOrder(orderId, async (rejectedOrder) => {
-                  if (wasApproved && rejectedOrder.userId && earned > 0) {
-                    try {
-                      await updateUserBonusPoints(rejectedOrder.userId, -earned);
-                    } catch (err) {
-                      console.error('Failed to refund bonus points in bulk reject:', err);
-                    }
-                  }
-                });
+                await rejectOrder(orderId);
                 successCount++;
               }
               break;

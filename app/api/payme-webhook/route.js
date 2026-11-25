@@ -394,19 +394,36 @@ async function performTransaction(params, requestId) {
   });
 }
 
+// Cancel is decided atomically in the database (payme_cancel_transaction,
+// supabase-migrations/add-admin-approve-order.sql): a late cancel of an
+// unperformed transaction never turns an order that was already processed
+// another way (e.g. approved by an admin) into 'rejected'; repeated cancels
+// return the stored cancel time.
 async function cancelTransaction(params, requestId) {
   const { id, reason } = params;
   const cancelTime = Date.now();
 
-  await getSupabase()
-    .from('orders')
-    .update({ status: 'rejected', payme_cancel_time: cancelTime, payme_state: -1, payme_cancel_reason: reason })
-    .eq('payme_transaction_id', id);
+  const { data, error } = await getSupabase().rpc('payme_cancel_transaction', {
+    p_transaction_id: id == null ? null : String(id),
+    p_time: cancelTime,
+    p_reason: Number.isInteger(Number(reason)) ? Number(reason) : null,
+  });
+  if (error) {
+    console.error('Payme CancelTransaction failed:', error);
+    return NextResponse.json({
+      jsonrpc: '2.0',
+      id: requestId,
+      error: { code: -31008, message: 'Unable to cancel transaction' },
+    });
+  }
 
+  // Unknown transaction: answered as before (no order changed)
+  const state = data?.state ?? -1;
+  const time = data?.cancel_time ?? cancelTime;
   return NextResponse.json({
     jsonrpc: '2.0',
     id: requestId,
-    result: { transaction: id, cancel_time: cancelTime, state: -1 },
+    result: { transaction: id, cancel_time: Number(time), state: Number(state) },
   });
 }
 
