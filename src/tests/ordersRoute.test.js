@@ -8,6 +8,21 @@ const m = vi.hoisted(() => ({ db: {}, failInsert: null }));
 
 vi.mock('../lib/supabase-server', () => ({
   createServerSupabaseClient: () => ({
+    // Stand-ins for the SQL functions in add-order-bonus-reservation.sql
+    rpc(name, args) {
+      if (name === 'expire_unpaid_orders') return Promise.resolve({ data: 0, error: null });
+      if (name !== 'create_customer_order') return Promise.resolve({ data: null, error: { message: `unknown rpc ${name}` } });
+      if (m.failInsert) return Promise.resolve({ data: null, error: m.failInsert });
+      const o = structuredClone(args.p_order);
+      const points = o.bonus_points_used || 0;
+      if (points > 0) {
+        const u = m.db.users.find(x => x.id === o.user_id);
+        if (!u || u.bonus_points < points) return Promise.resolve({ data: { result: 'insufficient_bonus', balance: u?.bonus_points ?? 0 }, error: null });
+        u.bonus_points -= points;
+      }
+      m.db.orders.push({ ...o, bonus_reserved: points, bonus_reservation: points > 0 ? 'held' : null });
+      return Promise.resolve({ data: { result: 'created' }, error: null });
+    },
     from(table) {
       const q = { filters: [], single: false };
       const rows = () => (m.db[table] || []).filter(r => q.filters.every(f => f(r)));
@@ -213,5 +228,20 @@ describe('POST /api/orders', () => {
     m.failInsert = { code: '42501', message: 'denied' };
     const r = await post({ ...request(), mode: 'create', expectedTotal: 200000 });
     expect(r.status).toBe(500);
+  });
+
+  test('bonus points are reserved with the order; a second order on the same balance is re-priced (409)', async () => {
+    const req = request({ useBonusPoints: true });
+    const quote = (await post({ ...req, mode: 'quote' })).json.quote;
+    expect(quote).toMatchObject({ bonusPointsUsed: 15000, total: 185000 });
+    // both orders were quoted against the same 15 000 balance
+    const first = await post({ ...req, mode: 'create', expectedTotal: 185000 });
+    const second = await post({ ...req, mode: 'create', expectedTotal: 185000 });
+    expect(first.status).toBe(201);
+    expect(m.db.orders[0]).toMatchObject({ bonus_reserved: 15000, bonus_reservation: 'held' });
+    expect(m.db.users[0].bonus_points).toBe(0);
+    expect(second.status).toBe(409);
+    expect(second.json).toMatchObject({ error: 'TOTAL_MISMATCH', quote: { bonusPointsUsed: 0, total: 200000 } });
+    expect(m.db.orders).toHaveLength(1);
   });
 });

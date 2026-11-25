@@ -197,16 +197,16 @@ Phase 2: Parallel fetch of orders + users (background, ~1s later)
 ### Payment Flow (Critical — never deduct early)
 ```
 PaymentPage:
-  1. Create order (status: 'pending')
+  1. POST /api/orders: server prices the order, reserves bonus points (create_customer_order) and stores it (status: 'pending')
   2. Store pendingPayment in localStorage
   3. Open Payme URL
   ↓ user completes / cancels
 PaymentStatusPage:
   4. Poll order status every 3s (up to 6 times)
-  5. On 'approved': clearCart() + deductBonusPoints() + redirect
+  5. On 'approved': clearCart() + redirect (bonus reservation is settled by the DB trigger, not the browser)
   6. On 'rejected': show failure, cart stays intact
 ```
-**Rule**: Never call `clearCart()` or deduct bonus points in `PaymentPage`. Always do it in `PaymentStatusPage` after confirmation.
+**Rule**: Never call `clearCart()` in `PaymentPage`. Bonus points are never changed by the browser: they are reserved on the server when the order is created, spent once on payment/approval and released on reject/cancel/expiry (`supabase-migrations/add-order-bonus-reservation.sql`).
 
 ### Hidden Products Filter
 ```javascript
@@ -351,7 +351,7 @@ https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://www.ailem.uz/api/supp
 - **Env vars not taking effect**: runtime vars live in `/opt/ailem/.env` (restart the container); build-time `NEXT_PUBLIC_*` are GitHub Actions **secrets** baked into the image at build — update the secret and re-run the deploy workflow
 - **Telegram Login Widget domain error**: Register domain in BotFather → `/mybots` → Bot Settings → Domain → `ailem.uz`
 - **Stale cart pricing**: Always resolve live `volume_pricing` from AdminContext, not cart snapshot
-- **Payment pre-deduction**: Never deduct cart/bonus before payment confirmed — always in PaymentStatusPage
+- **Payment pre-deduction**: Never clear the cart before payment is confirmed (PaymentStatusPage). Bonus points are reserved server-side and released if the order is not paid
 
 ## Deployment Checklist
 

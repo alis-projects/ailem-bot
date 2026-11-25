@@ -41,10 +41,14 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
   let service, anon, admin, buyerId, victimId, plainId, variantId, pointId, rateId, cookie;
   const createdOrders = [];
 
+  // The routes rate-limit per client IP (x-forwarded-for); give each request
+  // its own synthetic client so repeated local runs do not hit the limit.
+  let client = 0;
+  const clientIp = () => `10.77.${Math.floor(++client / 250) % 250}.${client % 250}`;
   const api = async (body, sessionCookie = cookie) => {
     const res = await fetch(`${env.app}/api/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(sessionCookie ? { cookie: sessionCookie } : {}) },
+      headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp(), ...(sessionCookie ? { cookie: sessionCookie } : {}) },
       body: JSON.stringify(body)
     });
     const json = await res.json();
@@ -54,7 +58,7 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
   const payme = async (method, params) => {
     const res = await fetch(`${env.app}/api/payme-webhook`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(`Paycom:${env.payme}`).toString('base64')}` },
+      headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp(), Authorization: `Basic ${Buffer.from(`Paycom:${env.payme}`).toString('base64')}` },
       body: JSON.stringify({ id: 1, method, params })
     });
     return res.json();
@@ -93,7 +97,7 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
 
     // Sign in through the real login route -> server-issued session cookie
     const res = await fetch(`${env.app}/api/auth/telegram-login`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp() },
       body: JSON.stringify(widget({ id: buyerTg, first_name: 'Local', last_name: 'Buyer' }))
     });
     if (res.status !== 200) throw new Error(`login failed: ${res.status}`);
@@ -101,6 +105,8 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
 
     const { error: authErr } = await admin.auth.signInWithPassword({ email: env.adminEmail, password: env.adminPassword });
     if (authErr) throw authErr;
+    const { data: settings } = await service.from('app_settings').select('bonus_config').eq('id', 1).single();
+    purchasePct = Number(settings.bonus_config?.purchaseBonus) || 1;
   });
 
   afterAll(async () => {
@@ -114,7 +120,8 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     for (const id of [buyerId, victimId].filter(Boolean)) await service.from('users').delete().eq('id', id);
   });
 
-  let guestOrder, userOrder, bonusOrder;
+  let guestOrder, userOrder, bonusOrder, concurrentOrder, purchasePct;
+  const reservedSpent = [];
 
   test('guest checkout: works, no account link, no bonus discount', async () => {
     const req = { account: 'guest', userId: buyerId, items: [{ productId: plainId, quantity: 1 }], delivery: selfPickup, useBonusPoints: true };
@@ -139,23 +146,6 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     expect(Number(r.total)).toBe(200000);
   });
 
-  test('own bonus discount: variant + sale + tier + courier, bonus capped by the own balance', async () => {
-    const req = {
-      account: 'user',
-      items: [{ productId: variantId, color: 'oq', size: 'katta', quantity: 2 }],
-      delivery: { courier: 'LocalPost', pickupPointId: pointId, fullName: 'Local Buyer', phone: '+998 90 000 00 00' },
-      useBonusPoints: true
-    };
-    const q = (await api({ ...req, mode: 'quote' })).json.quote;
-    expect(q).toMatchObject({ subtotal: 130000, bonusPointsUsed: 15000, bonusDiscount: 15000, deliveryFee: 15000, total: 130000 });
-    const c = await api({ ...req, mode: 'create', expectedTotal: 130000 });
-    expect(c.status).toBe(201);
-    bonusOrder = c.json.order;
-    const r = await row(bonusOrder.orderNumber);
-    expect(r).toMatchObject({ user_id: buyerId, bonus_points_used: 15000 });
-    expect(r.items[0]).toMatchObject({ price: 65000, variantPrice: 70000, color: 'Oq', size: 'Katta' });
-  });
-
   test("another user's balance cannot be used", async () => {
     const req = { account: 'user', userId: victimId, user_id: victimId, items: [{ productId: plainId, quantity: 5 }], delivery: selfPickup, useBonusPoints: true };
     // with the buyer's session: the victim id in the body is ignored
@@ -171,6 +161,25 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     expect(g).toMatchObject({ bonusPointsUsed: 0, total: 500000 });
     expect((await service.from('orders').select('id').eq('user_id', victimId)).data).toHaveLength(0);
     expect(await balance(victimId)).toBe(900000);
+  });
+
+  test('own bonus discount: variant + sale + tier + courier, bonus capped by the own balance', async () => {
+    const req = {
+      account: 'user',
+      items: [{ productId: variantId, color: 'oq', size: 'katta', quantity: 2 }],
+      delivery: { courier: 'LocalPost', pickupPointId: pointId, fullName: 'Local Buyer', phone: '+998 90 000 00 00' },
+      useBonusPoints: true
+    };
+    const q = (await api({ ...req, mode: 'quote' })).json.quote;
+    expect(q).toMatchObject({ subtotal: 130000, bonusPointsUsed: 15000, bonusDiscount: 15000, deliveryFee: 15000, total: 130000 });
+    const c = await api({ ...req, mode: 'create', expectedTotal: 130000 });
+    expect(c.status).toBe(201);
+    bonusOrder = c.json.order;
+    const r = await row(bonusOrder.orderNumber);
+    expect(r).toMatchObject({ user_id: buyerId, bonus_points_used: 15000, bonus_reserved: 15000, bonus_reservation: 'held' });
+    // reserved at creation: the balance is already reduced
+    expect(await balance(buyerId)).toBe(0);
+    expect(r.items[0]).toMatchObject({ price: 65000, variantPrice: 70000, color: 'Oq', size: 'Katta' });
   });
 
   test('a wrong amount is refused and nothing is stored', async () => {
@@ -216,6 +225,96 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     const { data: s } = await service.from('app_settings').select('bonus_config').eq('id', 1).single();
     const pct = Number(s.bonus_config?.purchaseBonus) || 1;
     expect(await balance(buyerId)).toBe(bonusBefore + Math.round(200000 * pct / 100));
+  });
+
+  test('scenario A — paid without opening the status page: the reservation is spent once by the server', async () => {
+    // bonusOrder holds 15 000; nobody opens /payment/status
+    const before = await balance(buyerId);
+    const account = { order_id: bonusOrder.paymeOrderId };
+    expect((await payme('CreateTransaction', { id: `${tag}-a`, time: Date.now(), amount: 130000 * 100, account })).result?.state).toBe(1);
+    expect((await payme('PerformTransaction', { id: `${tag}-a` })).result?.state).toBe(2);
+    const r = await row(bonusOrder.orderNumber);
+    expect(r).toMatchObject({ status: 'approved', bonus_reservation: 'spent', bonus_reserved: 15000 });
+    // the 15 000 stay spent; only the purchase bonus was added, once
+    const credited = (await balance(buyerId)) - before;
+    expect(credited).toBe(Math.round(Number(r.subtotal || r.total) * purchasePct / 100));
+    reservedSpent.push(bonusOrder.orderNumber);
+  });
+
+  test('scenario B — concurrent orders on one balance: exactly one gets the bonus', async () => {
+    await service.from('users').update({ bonus_points: 20000 }).eq('id', buyerId);
+    const req = { account: 'user', items: [{ productId: plainId, quantity: 1 }], delivery: selfPickup, useBonusPoints: true };
+    const q = (await api({ ...req, mode: 'quote' })).json.quote;
+    expect(q).toMatchObject({ bonusPointsUsed: 20000, total: 80000 });
+    // six checkouts quoted against the same 20 000, submitted at once
+    const results = await Promise.all(Array.from({ length: 6 }, () => api({ ...req, mode: 'create', expectedTotal: 80000 })));
+    const ok = results.filter(r => r.status === 201);
+    const refused = results.filter(r => r.status === 409);
+    expect(ok).toHaveLength(1);
+    expect(refused).toHaveLength(5);
+    for (const r of refused) expect(r.json).toMatchObject({ error: 'TOTAL_MISMATCH', quote: { bonusPointsUsed: 0, total: 100000 } });
+    expect(await balance(buyerId)).toBe(0);
+    const held = (await service.from('orders').select('bonus_reserved').eq('user_id', buyerId).eq('bonus_reservation', 'held')).data;
+    expect(held.reduce((s, o) => s + o.bonus_reserved, 0)).toBe(20000);
+    concurrentOrder = ok[0].json.order;
+  });
+
+  test('scenario C — repeated Payme notifications: reservation spent once, bonus credited once', async () => {
+    const account = { order_id: concurrentOrder.paymeOrderId };
+    expect((await payme('CreateTransaction', { id: `${tag}-c`, time: Date.now(), amount: 80000 * 100, account })).result?.state).toBe(1);
+    // repeated CreateTransaction for the same transaction id is answered, not duplicated
+    expect((await payme('CreateTransaction', { id: `${tag}-c`, time: Date.now(), amount: 80000 * 100, account })).result?.state).toBe(1);
+    const before = await balance(buyerId);
+    const performs = await Promise.all(Array.from({ length: 6 }, () => payme('PerformTransaction', { id: `${tag}-c` })));
+    expect(performs.map(p => p.result?.state)).toEqual([2, 2, 2, 2, 2, 2]);
+    expect((await payme('PerformTransaction', { id: `${tag}-c` })).result?.state).toBe(2);
+    const r = await row(concurrentOrder.orderNumber);
+    expect(r).toMatchObject({ status: 'approved', bonus_reservation: 'spent', bonus_reserved: 20000 });
+    expect(r.fulfilled_at).not.toBeNull();
+    expect((await balance(buyerId)) - before).toBe(Math.round(Number(r.subtotal || r.total) * purchasePct / 100));
+  });
+
+  test('cancel, admin reject and expiry release an unpaid reservation exactly once', async () => {
+    const req = { account: 'user', items: [{ productId: plainId, quantity: 1 }], delivery: selfPickup, useBonusPoints: true };
+    const reserve = async (points) => {
+      await service.from('users').update({ bonus_points: points }).eq('id', buyerId);
+      const c = await api({ ...req, mode: 'create', expectedTotal: 100000 - points });
+      expect(c.status).toBe(201);
+      expect(await balance(buyerId)).toBe(0);
+      return c.json.order;
+    };
+    // Payme cancels an unperformed transaction
+    const o1 = await reserve(5000);
+    expect((await payme('CreateTransaction', { id: `${tag}-x`, time: Date.now(), amount: 95000 * 100, account: { order_id: o1.paymeOrderId } })).result?.state).toBe(1);
+    expect((await payme('CancelTransaction', { id: `${tag}-x`, reason: 4 })).result?.state).toBe(-1);
+    expect((await payme('CancelTransaction', { id: `${tag}-x`, reason: 4 })).result?.state).toBe(-1);
+    expect(await balance(buyerId)).toBe(5000);
+    expect(await row(o1.orderNumber)).toMatchObject({ status: 'rejected', bonus_reservation: 'released' });
+
+    // admin rejects an unpaid order (twice)
+    const o2 = await reserve(7000);
+    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o2.orderNumber);
+    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o2.orderNumber);
+    expect(await balance(buyerId)).toBe(7000);
+    expect(await row(o2.orderNumber)).toMatchObject({ bonus_reservation: 'released' });
+
+    // unpaid for longer than the limit: expired, points back, cannot be paid
+    const o3 = await reserve(9000);
+    await service.from('orders').update({ created_at: new Date(Date.now() - 25 * 3600 * 1000).toISOString() }).eq('order_number', o3.orderNumber);
+    const { data: n1 } = await service.rpc('expire_unpaid_orders');
+    const { data: n2 } = await service.rpc('expire_unpaid_orders');
+    expect(n1).toBeGreaterThanOrEqual(1);
+    expect(n2).toBe(0);
+    expect(await balance(buyerId)).toBe(9000);
+    expect(await row(o3.orderNumber)).toMatchObject({ status: 'rejected', bonus_reservation: 'released' });
+    const late = await payme('CheckPerformTransaction', { amount: 91000 * 100, account: { order_id: o3.paymeOrderId } });
+    expect(late.error).toBeTruthy();
+
+    // clients cannot forge or reopen a reservation
+    await admin.from('orders').update({ bonus_reservation: 'held', bonus_reserved: 999999 }).eq('order_number', o3.orderNumber);
+    expect(await row(o3.orderNumber)).toMatchObject({ bonus_reservation: 'released', bonus_reserved: 9000 });
+    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o3.orderNumber);
+    expect(await balance(buyerId)).toBe(9000);
   });
 
   test('admin can process orders manually; the public key cannot', async () => {

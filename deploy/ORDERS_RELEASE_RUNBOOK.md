@@ -1,11 +1,14 @@
 # Runbook: server-priced, session-bound checkout (PR #6)
 
-The release has two parts, applied in this order:
+The release has three parts, applied in this order:
 
-1. **App release.** It adds `POST /api/orders`, which prices orders on the server and inserts them with the service role. It also adds the customer session cookie issued by `/api/auth/telegram-login`.
-2. **DB migration** `supabase-migrations/secure-orders-writes.sql`. It removes all direct writes to `orders` with the public anon key.
+1. **DB migration** `supabase-migrations/add-order-bonus-reservation.sql`, **before the deploy**. It adds the bonus reservation: `create_customer_order`, the reservation trigger and `expire_unpaid_orders`. The new app calls these. The currently deployed app is not affected.
+2. **App release.** It adds `POST /api/orders`, which prices orders and reserves bonus points on the server. It also adds the customer session cookie issued by `/api/auth/telegram-login`.
+3. **DB migration** `supabase-migrations/secure-orders-writes.sql`, **after the deploy**. It removes all direct writes to `orders` with the public anon key.
 
-**Order matters: deploy first, migrate second.** Images built before this release insert orders as anon. Once the migration is applied, checkout on those images fails with `42501`.
+**Order matters:**
+- **Reservation before the deploy.** Without it the new `/api/orders` cannot create orders: `create_customer_order` does not exist.
+- **Write ban after the deploy.** Images built before this release insert orders as anon. Once the ban is applied, checkout on those images fails with `42501`.
 
 **Rules for the whole runbook:**
 - Never print, paste or echo a secret value.
@@ -42,6 +45,22 @@ grep IMAGE_TAG /opt/ailem/.deploy.env
 ```
 
 For example, `sha-2127f5c`. **This tag is a valid code rollback target only until step 3.** After the migration it can no longer create orders.
+
+### 0.3 Apply the bonus reservation migration
+
+Run `supabase-migrations/add-order-bonus-reservation.sql` in the SQL Editor. The file is idempotent and runs as one transaction. Then run the post-check, which is read-only:
+
+```sql
+SELECT column_name FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'orders' AND column_name IN ('bonus_reserved','bonus_reservation');  -- 2 rows
+SELECT tgname FROM pg_trigger WHERE tgrelid = 'public.orders'::regclass AND tgname LIKE 'orders_bonus%';            -- 2 rows
+SELECT has_function_privilege('anon','public.create_customer_order(jsonb)','EXECUTE'),
+       has_function_privilege('service_role','public.create_customer_order(jsonb)','EXECUTE');                       -- f, t
+```
+
+**Safe for the running image.** It does not set the new columns, so its orders keep `bonus_reservation = NULL` and the trigger ignores them.
+
+If you abort the release after this step, the migration can stay. It only adds columns, triggers and service-role functions.
 
 ## 1. Merge and deploy
 
@@ -105,6 +124,16 @@ SELECT has_table_privilege('anon','public.orders','INSERT'),
 3. **Checkout.** Run the guest and signed-in quote checks from step 2 again.
 4. **Admin panel.** Open «Buyurtmalar». The orders list must load, and a status change on a test or pending order must work. Admins write as `authenticated` + `is_admin()`.
 5. **Payme.** Optionally make one small real payment. Then check the order: `approved`, `fulfilled_at` set, stock reduced once, bonus credited once.
+6. **Bonus reservation.** Check the latest orders that used bonus points:
+
+   ```sql
+   SELECT order_number, status, bonus_points_used, bonus_reserved, bonus_reservation, created_at
+     FROM orders WHERE bonus_reservation IS NOT NULL ORDER BY created_at DESC LIMIT 20;
+   ```
+
+   - `held` means the order is unpaid.
+   - `spent` means it was paid or approved.
+   - `released` means it was rejected, cancelled or expired, and the points went back to the customer.
 
 ---
 
@@ -122,6 +151,9 @@ SELECT has_table_privilege('anon','public.orders','INSERT'),
 | Payment page shows "Buyurtmani hisoblab bo'lmadi" or "saqlab bo'lmadi"; logs show `orders: pricing failed` / `orders: insert failed` | DB or network error, or a broken key | Read the logs (see below). If the service role key is wrong, every server route fails: fix `.env`. If the cause is a constraint or column error, fix forward with a migration, never by re-opening anon writes |
 | `42501` in the browser console on checkout | The running image predates this release (rolled back, or deploy not finished) | Redeploy the release image (see below) or re-run the deploy workflow |
 | Bug in `/api/orders` code | — | Hotfix commit → push to `main` → deploy. While waiting, re-deploying the same release image is safe |
+| Logs show `orders: insert failed` with `function create_customer_order … does not exist` | Step 0.3 was skipped | Apply `add-order-bonus-reservation.sql` now. Nothing else is needed |
+| Unpaid orders keep bonus points `held` for long | `expire_unpaid_orders` runs only when someone uses checkout | Run it manually as postgres in the SQL Editor: `SELECT public.expire_unpaid_orders();`. Unpaid orders with a reservation, older than 24 h and without an open Payme transaction, become `rejected`, and their points come back |
+| A customer's points did not come back after a cancel | The order was already paid (`spent`). Refunds of paid orders are out of scope for this release | Handle it manually and log it in the audit trail. Do not edit `bonus_reservation`: the trigger ignores direct changes |
 
 ### Commands
 

@@ -152,6 +152,14 @@ export async function POST(request) {
     return bad('SERVER_NOT_CONFIGURED', 'Server sozlanmagan', 500);
   }
 
+  // Release bonus reservations of unpaid orders past their time (best effort),
+  // so the balance priced below is current.
+  try {
+    await supabase.rpc('expire_unpaid_orders');
+  } catch (e) {
+    console.error('orders: expire_unpaid_orders failed', e);
+  }
+
   let priced;
   try {
     priced = await loadAndPrice(request, supabase, body);
@@ -194,10 +202,24 @@ export async function POST(request) {
     status: 'pending',
     date: new Date(now).toISOString().split('T')[0]
   };
-  const { error } = await supabase.from('orders').insert([row]);
-  if (error) {
-    console.error('orders: insert failed', error);
+  // One DB transaction: reserve the bonus points (only if the balance still
+  // covers them; concurrent orders on one balance serialize on the user row)
+  // and insert the order. See supabase-migrations/add-order-bonus-reservation.sql.
+  const { data: created, error } = await supabase.rpc('create_customer_order', { p_order: row });
+  if (error || !created || (created.result !== 'created' && created.result !== 'insufficient_bonus')) {
+    console.error('orders: insert failed', error || created);
     return bad('SERVER_ERROR', "Buyurtmani saqlab bo'lmadi", 500);
+  }
+  if (created.result === 'insufficient_bonus') {
+    // The balance was used by another order meanwhile: show the new amount
+    let fresh;
+    try {
+      fresh = await loadAndPrice(request, supabase, body);
+    } catch (e) {
+      console.error('orders: re-pricing failed', e);
+      return bad('SERVER_ERROR', "Buyurtmani hisoblab bo'lmadi", 500);
+    }
+    return bad('TOTAL_MISMATCH', "Bonus balansi o'zgardi. Yangi summani tekshiring", 409, { quote: publicQuote(fresh.quote) });
   }
   return NextResponse.json({ order: { orderNumber, paymeOrderId, ...publicQuote(quote) } }, { status: 201 });
 }

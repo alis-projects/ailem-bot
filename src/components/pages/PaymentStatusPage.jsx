@@ -7,7 +7,7 @@ import { UserContext } from '../../context/UserContext';
 
 const PaymentStatusPage = ({ orderId, paymentMethod, onNavigate }) => {
   const { clearCart } = useCart();
-  const { user, updateBonusPoints } = useContext(UserContext);
+  const { user } = useContext(UserContext);
   const [status, setStatus] = useState('checking'); // checking, success, failed, timeout, error
   const [order, setOrder] = useState(null);
   const [checkCount, setCheckCount] = useState(0);
@@ -62,15 +62,9 @@ const PaymentStatusPage = ({ orderId, paymentMethod, onNavigate }) => {
         console.log('✅ Payment successful!');
         clearCart();
 
-        // Deduct bonus points if used in this order
-        if (orderData.bonusPointsUsed > 0) {
-          try {
-            await updateBonusPoints(-orderData.bonusPointsUsed);
-            console.log(`✅ Deducted ${orderData.bonusPointsUsed} bonus points`);
-          } catch (err) {
-            console.error('❌ Failed to deduct bonus points:', err);
-          }
-        }
+        // Bonus points used in this order were reserved on the server when the
+        // order was created and are settled by the database when the payment is
+        // confirmed (add-order-bonus-reservation.sql) — nothing to do here.
 
         setStatus('success');
         setOrder(orderData);
