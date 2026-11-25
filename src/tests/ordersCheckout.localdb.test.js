@@ -317,6 +317,90 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     expect(await balance(buyerId)).toBe(9000);
   });
 
+  test('scenario D — Payme transaction opened before the reservation expires, confirmed after', async () => {
+    const req = { account: 'user', items: [{ productId: plainId, quantity: 1 }], delivery: selfPickup, useBonusPoints: true };
+    const DAY = 25 * 3600 * 1000;
+    const backdate = (o) => service.from('orders').update({ created_at: new Date(Date.now() - DAY).toISOString() }).eq('order_number', o.orderNumber);
+    const reserve = async (points) => {
+      await service.from('users').update({ bonus_points: points }).eq('id', buyerId);
+      const c = await api({ ...req, mode: 'create', expectedTotal: 100000 - points });
+      expect(c.status).toBe(201);
+      return c.json.order;
+    };
+    // Invariants for an order with a reservation of `points` and a buyer balance of 0 before payment
+    const consistent = async (o, points, startBalance) => {
+      const r = await row(o.orderNumber);
+      const bal = await balance(buyerId);
+      if (r.status === 'approved') {
+        expect(r).toMatchObject({ bonus_reservation: 'spent', payme_state: 2 });
+        expect(r.fulfilled_at).not.toBeNull();
+        expect(bal).toBe(startBalance + Math.round(Number(r.subtotal) * purchasePct / 100));
+      } else {
+        expect(r.status).toBe('rejected');
+        expect(r.bonus_reservation).toBe('released');
+        expect(r.fulfilled_at).toBeNull();
+        expect(r.payme_state === null || r.payme_state < 2).toBe(true);
+        expect(bal).toBe(startBalance + points);
+      }
+      return r;
+    };
+    const pay = (o, id, total) => payme('CreateTransaction', { id, time: Date.now(), amount: total * 100, account: { order_id: o.paymeOrderId } });
+
+    // D1: transaction opened, reservation passes 24 h, ANOTHER order runs the cleanup, then Payme performs
+    const o1 = await reserve(4000);
+    expect((await pay(o1, `${tag}-d1`, 96000)).result?.state).toBe(1);
+    await backdate(o1);
+    // another buyer's checkout triggers expire_unpaid_orders through /api/orders
+    expect((await api({ account: 'guest', items: [{ productId: plainId, quantity: 1 }], delivery: selfPickup, mode: 'quote' }, null)).status).toBe(200);
+    expect(await row(o1.orderNumber)).toMatchObject({ status: 'pending', bonus_reservation: 'held', payme_state: 1 });
+    expect((await payme('PerformTransaction', { id: `${tag}-d1` })).result?.state).toBe(2);
+    await consistent(o1, 4000, 0);
+    const afterD1 = await balance(buyerId);
+
+    // D2: transaction opened, reservation passes 24 h, NO cleanup has run yet; Payme performs; cleanup runs afterwards
+    await service.from('users').update({ bonus_points: 6000 }).eq('id', buyerId);
+    const o2 = await (async () => { const c = await api({ ...req, mode: 'create', expectedTotal: 94000 }); expect(c.status).toBe(201); return c.json.order; })();
+    expect((await pay(o2, `${tag}-d2`, 94000)).result?.state).toBe(1);
+    await backdate(o2);
+    expect((await payme('PerformTransaction', { id: `${tag}-d2` })).result?.state).toBe(2);
+    await service.rpc('expire_unpaid_orders');
+    await consistent(o2, 6000, 0);
+    expect(afterD1).toBeGreaterThanOrEqual(0);
+
+    // D3: order older than 24 h, cleanup not run yet, Payme opens the transaction only now, then performs
+    const o3 = await reserve(3000);
+    await backdate(o3);
+    expect((await pay(o3, `${tag}-d3`, 97000)).result?.state).toBe(1);
+    await service.rpc('expire_unpaid_orders');   // open transaction: must be left alone
+    expect((await payme('PerformTransaction', { id: `${tag}-d3` })).result?.state).toBe(2);
+    await consistent(o3, 3000, 0);
+
+    // D4: cleanup and Payme CreateTransaction race on an expired reservation (5 rounds);
+    // whichever wins, order, payment and bonus must agree
+    for (let i = 0; i < 5; i++) {
+      const o = await reserve(2000);
+      await backdate(o);
+      const [, created] = await Promise.all([service.rpc('expire_unpaid_orders'), pay(o, `${tag}-d4-${i}`, 98000)]);
+      console.log(`D4 round ${i}: ${created.result?.state === 1 ? 'payment won (paid, spent)' : 'cleanup won (rejected, released)'}`);
+      if (created.result?.state === 1) {
+        expect((await payme('PerformTransaction', { id: `${tag}-d4-${i}` })).result?.state).toBe(2);
+      } else {
+        expect(created.error).toBeTruthy();              // refused: order no longer payable
+        const perform = await payme('PerformTransaction', { id: `${tag}-d4-${i}` });
+        expect(perform.error).toBeTruthy();
+      }
+      await consistent(o, 2000, 0);
+    }
+
+    // D5: transaction opened, then the order is rejected (admin) before Payme performs: Perform is refused
+    const o5 = await reserve(1000);
+    expect((await pay(o5, `${tag}-d5`, 99000)).result?.state).toBe(1);
+    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o5.orderNumber);
+    const p5 = await payme('PerformTransaction', { id: `${tag}-d5` });
+    expect(p5.error).toBeTruthy();
+    await consistent(o5, 1000, 0);
+  }, 120000);
+
   test('admin can process orders manually; the public key cannot', async () => {
     // what ordersAPI.updateStatus does: find by order_number, update by id
     const { data: found, error: findErr } = await admin.from('orders').select('id, status').eq('order_number', guestOrder.orderNumber);
