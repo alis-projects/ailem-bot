@@ -68,7 +68,6 @@ app/                         # Next.js App Router
 │   ├── click-webhook/route.js
 │   ├── payme-debug/route.js
 │   ├── create-invoice/route.js
-│   ├── test-stock-deduction/route.js
 │   └── support/
 │       ├── webhook/route.js   # Telegram webhook → saves admin replies to DB
 │       ├── messages/route.js  # GET — poll messages for session
