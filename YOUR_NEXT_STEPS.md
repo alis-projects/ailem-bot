@@ -84,7 +84,7 @@ You'll get a URL like: `https://ailem-bot.vercel.app`
 
 **`.env`** - Your bot token and settings
 ```
-VITE_TELEGRAM_BOT_TOKEN=your_token_here
+TELEGRAM_BOT_TOKEN=your_token_here
 ```
 
 **`src/data/products.js`** - Your products (10 demo products included)

@@ -28,7 +28,7 @@
 ```
 VITE_SUPABASE_URL = [configured]
 VITE_SUPABASE_ANON_KEY = [configured]
-VITE_TELEGRAM_BOT_TOKEN = [configured]
+TELEGRAM_BOT_TOKEN = [configured]
 VITE_PAYME_MERCHANT_ID = 68ad7cf18f3347fe865948ca
 VITE_PAYME_TEST_MODE = true
 PAYME_KEY = ojWN@Ua290xxu%u0cdGP5U9JA?rMr&2b#oN3 (test)

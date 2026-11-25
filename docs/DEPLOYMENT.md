@@ -213,7 +213,7 @@ Enter your deployed URL.
 |----------|-------------|---------------|
 | `VITE_SUPABASE_URL` | Your Supabase project URL | Supabase Dashboard → Settings → API |
 | `VITE_SUPABASE_ANON_KEY` | Supabase anonymous key | Supabase Dashboard → Settings → API |
-| `VITE_TELEGRAM_BOT_TOKEN` | Telegram bot token | @BotFather → Your bot token |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token | @BotFather → Your bot token |
 | `VITE_ADMIN_TELEGRAM_ID` | Your Telegram user ID | Message @userinfobot on Telegram |
 
 **How to add them:**
@@ -226,7 +226,7 @@ Enter your deployed URL.
 ```env
 VITE_SUPABASE_URL=https://xxxxx.supabase.co
 VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-VITE_TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
 VITE_ADMIN_TELEGRAM_ID=123456789
 ```
 

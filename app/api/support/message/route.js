@@ -62,7 +62,7 @@ export async function POST(request) {
     if (error) throw error;
 
     // Forward to admin via Telegram
-    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
     const adminChatId = process.env.NEXT_PUBLIC_ADMIN_CHAT_ID;
 
     if (botToken && adminChatId) {

@@ -29,7 +29,7 @@ function getClickSecretKey() {
 
 function getTelegramConfig() {
   return {
-    botToken: process.env.TELEGRAM_BOT_TOKEN || process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN,
+    botToken: process.env.TELEGRAM_BOT_TOKEN,
     adminChatId: process.env.NEXT_PUBLIC_ADMIN_CHAT_ID,
   };
 }

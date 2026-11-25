@@ -16,13 +16,13 @@
 
 Your bot token is stored in `.env`:
 ```
-VITE_TELEGRAM_BOT_TOKEN=7721843664:AAEDBUydg2j3sxCRTBApCOkMYIg8ZT_eMyw
+TELEGRAM_BOT_TOKEN=<BOT_TOKEN_REDACTED>
 ```
 
 **After revoking**, update it with your new token:
 ```bash
 # Edit .env file
-VITE_TELEGRAM_BOT_TOKEN=your_new_token_here
+TELEGRAM_BOT_TOKEN=your_new_token_here
 ```
 
 ## 🚀 Setup Steps

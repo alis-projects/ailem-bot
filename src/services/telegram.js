@@ -1,19 +1,19 @@
 import { loadFromLocalStorage, saveToLocalStorage } from '../utils/helpers';
+import { callTelegram } from './telegramProxy';
 
 /**
  * Telegram Bot Notification Service
- * Sends notifications to users and admins via Telegram Bot API
+ * Sends notifications to users and admins via the admin-only server route
+ * /api/telegram/send. The bot token is server-only (TELEGRAM_BOT_TOKEN) and is
+ * never read or stored in the browser.
  */
 
-// Get bot token from environment or localStorage
-const getBotToken = () => {
-  // First check localStorage for bot token (set by admin)
-  const storedToken = loadFromLocalStorage('telegramBotToken');
-  if (storedToken) return storedToken;
-
-  // Fallback to environment variable (if using build-time config)
-  return process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN || null;
-};
+// Drop any bot token an older admin UI saved in this browser.
+try {
+  if (typeof window !== 'undefined') window.localStorage?.removeItem('telegramBotToken');
+} catch {
+  // localStorage may throw (Telegram Desktop); nothing to clean up then.
+}
 
 // Get admin chat ID (where to send admin notifications)
 const getAdminChatId = () => {
@@ -29,42 +29,22 @@ const getAdminChatId = () => {
  * Send message via Telegram Bot API
  */
 export const sendTelegramMessage = async (chatId, message, options = {}) => {
-  const botToken = getBotToken();
-
-  if (!botToken) {
-    console.warn('⚠️ Telegram bot token not configured. Skipping notification.');
-    return { success: false, error: 'Bot token not configured' };
-  }
-
   if (!chatId) {
     console.warn('⚠️ Chat ID not provided. Skipping notification.');
     return { success: false, error: 'Chat ID not provided' };
   }
 
   try {
-    const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-
-    const payload = {
+    console.log('📤 Sending Telegram notification to:', chatId);
+    const data = await callTelegram('sendMessage', {
       chat_id: chatId,
       text: message,
       parse_mode: 'HTML', // Allows HTML formatting
       disable_web_page_preview: true,
       ...options
-    };
-
-    console.log('📤 Sending Telegram notification to:', chatId);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
+    if (!data.ok) {
       throw new Error(data.description || 'Failed to send Telegram message');
     }
 
@@ -377,62 +357,45 @@ You will receive order notifications here.
 };
 
 /**
- * Save bot configuration to localStorage
+ * Save bot configuration to localStorage.
+ * The bot token is server-only now; the first argument is ignored and kept
+ * only so existing callers keep working.
  */
-export const saveBotConfig = (botToken, adminChatId) => {
-  if (botToken) {
-    saveToLocalStorage('telegramBotToken', botToken);
-  }
+export const saveBotConfig = (_botToken, adminChatId) => {
   if (adminChatId) {
     saveToLocalStorage('adminChatId', adminChatId);
   }
 };
 
 /**
- * Get bot configuration
+ * Get bot configuration (token is server-side and never exposed here)
  */
 export const getBotConfig = () => {
+  const adminChatId = getAdminChatId();
   return {
-    botToken: getBotToken(),
-    adminChatId: getAdminChatId(),
-    isConfigured: !!getBotToken() && !!getAdminChatId()
+    adminChatId,
+    isConfigured: !!adminChatId
   };
 };
 
 /**
- * Send photo via Telegram Bot API
+ * Send photo via Telegram Bot API (through the admin-only server route)
  */
 export const sendTelegramPhoto = async (chatId, photoUrl, caption, options = {}) => {
-  const botToken = getBotToken();
-
-  if (!botToken) {
-    return { success: false, error: 'Bot token not configured' };
-  }
-
   if (!chatId) {
     return { success: false, error: 'Chat ID not provided' };
   }
 
   try {
-    const url = `https://api.telegram.org/bot${botToken}/sendPhoto`;
-
-    const payload = {
+    const data = await callTelegram('sendPhoto', {
       chat_id: chatId,
       photo: photoUrl,
       caption,
       parse_mode: 'HTML',
       ...options
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
+    if (!data.ok) {
       throw new Error(data.description || 'Failed to send Telegram photo');
     }
 

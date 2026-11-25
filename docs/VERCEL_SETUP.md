@@ -31,14 +31,14 @@ Click "Environment Variables" and add these 4 variables:
 |------|-------|-----------------|
 | `VITE_SUPABASE_URL` | Your Supabase project URL | https://app.supabase.com → Your Project → Settings → API |
 | `VITE_SUPABASE_ANON_KEY` | Your Supabase anon key | Same place as above |
-| `VITE_TELEGRAM_BOT_TOKEN` | Your bot token | Message @BotFather on Telegram |
+| `TELEGRAM_BOT_TOKEN` | Your bot token | Message @BotFather on Telegram |
 | `VITE_ADMIN_TELEGRAM_ID` | Your Telegram user ID | Message @userinfobot on Telegram |
 
 **Example values (replace with yours):**
 ```
 VITE_SUPABASE_URL = https://xxxxx.supabase.co
 VITE_SUPABASE_ANON_KEY = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-VITE_TELEGRAM_BOT_TOKEN = 1234567890:ABCdefGHI...
+TELEGRAM_BOT_TOKEN = 1234567890:ABCdefGHI...
 VITE_ADMIN_TELEGRAM_ID = 123456789
 ```
 
