@@ -70,7 +70,7 @@ Telegram Bot API wrapper (`src/services/telegram.js`).
   - `delivered`: order delivered
   - `rejected`: order rejected + `@ailem_yordam` support handle
 
-⚠ **Security**: `NEXT_PUBLIC_TELEGRAM_BOT_TOKEN` is exposed in browser bundle. Should be moved to server-side only.
+**Security**: the bot token is server-only (`TELEGRAM_BOT_TOKEN`). Client helpers go through `callTelegram()` (`telegramProxy.js`) → `POST /api/telegram/send`, which verifies the caller's Supabase JWT + `admin_users` row and only allows `sendMessage`/`sendPhoto`. All callers are admin-panel code. Never read a bot token in client code or pass it as a `NEXT_PUBLIC_`/`VITE_` build arg.
 
 ## payme.js
 

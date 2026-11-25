@@ -2,21 +2,13 @@
 // Sends Telegram notifications when out-of-stock products become available
 
 import { stockNotificationsAPI } from './api';
-
-const TELEGRAM_BOT_TOKEN = process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
+import { callTelegram } from './telegramProxy';
 
 /**
  * Send Telegram message to a user
  */
 async function sendTelegramMessage(chatId, message, productUrl = null) {
-  if (!TELEGRAM_BOT_TOKEN) {
-    console.error('❌ Telegram bot token not configured');
-    return false;
-  }
-
   try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-
     const payload = {
       chat_id: chatId,
       text: message,
@@ -35,20 +27,14 @@ async function sendTelegramMessage(chatId, message, productUrl = null) {
       };
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const result = await callTelegram('sendMessage', payload);
 
-    if (response.ok) {
+    if (result.ok) {
       console.log(`✅ Telegram notification sent to chat ${chatId}`);
       return true;
-    } else {
-      const errorText = await response.text();
-      console.error(`❌ Failed to send Telegram notification: ${errorText}`);
-      return false;
     }
+    console.error(`❌ Failed to send Telegram notification: ${result.description}`);
+    return false;
   } catch (error) {
     console.error('❌ Telegram notification error:', error);
     return false;

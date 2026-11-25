@@ -137,8 +137,8 @@ Your bonus points have been refunded. Please contact support if you have questio
 ### Not Receiving Notifications?
 
 1. **Check Bot Token**
-   - Make sure `VITE_TELEGRAM_BOT_TOKEN` is set correctly in `.env`
-   - The bot token is already configured: `7721843664:AAEDBUydg2j3sxCRTBApCOkMYIg8ZT_eMyw`
+   - Make sure `TELEGRAM_BOT_TOKEN` is set correctly in `.env`
+   - The bot token is already configured: `<BOT_TOKEN_REDACTED>`
 
 2. **Check Admin Chat ID**
    - Make sure you've set `VITE_ADMIN_CHAT_ID` in `.env`
@@ -207,7 +207,7 @@ The service already includes these ready-to-use functions:
 
 ```bash
 # Required for notifications
-VITE_TELEGRAM_BOT_TOKEN=7721843664:AAEDBUydg2j3sxCRTBApCOkMYIg8ZT_eMyw
+TELEGRAM_BOT_TOKEN=<BOT_TOKEN_REDACTED>
 VITE_ADMIN_CHAT_ID=YOUR_TELEGRAM_CHAT_ID_HERE
 
 # Other env vars (already configured)

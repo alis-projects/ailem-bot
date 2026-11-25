@@ -9,7 +9,7 @@ export async function POST(request) {
   }
 
   // Use server-side env var (not NEXT_PUBLIC_ which leaks to browser)
-  const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
+  const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   const PAYMENT_PROVIDER_TOKEN = process.env.PAYMENT_PROVIDER_TOKEN || '';
 
   if (!BOT_TOKEN) {

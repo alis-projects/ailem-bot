@@ -271,7 +271,7 @@ VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your_anon_key
 
 # Telegram Bot (Required for Telegram features)
-VITE_TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
 
 # Payme Payment Gateway (Required for payments)
 VITE_PAYME_MERCHANT_ID=68ad7cf18f3347fe865948ca

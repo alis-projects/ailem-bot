@@ -751,7 +751,7 @@ VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your_anon_key
 
 # Telegram Bot
-VITE_TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_BOT_TOKEN=your_bot_token
 
 # Payme (Primary Payment)
 VITE_PAYME_MERCHANT_ID=your_merchant_id

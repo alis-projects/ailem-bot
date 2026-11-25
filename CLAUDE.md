@@ -171,14 +171,13 @@ NEXT_PUBLIC_SUPABASE_URL=https://jbdzhwenzedlwbdpguyt.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 NEXT_PUBLIC_PAYME_MERCHANT_ID=...
 NEXT_PUBLIC_PAYME_TEST_MODE=true
-NEXT_PUBLIC_TELEGRAM_BOT_TOKEN=...   # ⚠ exposed in bundle — should move to server
 NEXT_PUBLIC_APP_URL=https://www.ailem.uz
 ```
 
 **Server-side** (API routes only — no prefix):
 ```bash
 SUPABASE_SERVICE_ROLE_KEY=...        # Bypasses RLS
-TELEGRAM_BOT_TOKEN=...               # For webhooks
+TELEGRAM_BOT_TOKEN=...               # Server-only. Webhooks + /api/telegram/send. Never NEXT_PUBLIC_/VITE_
 ```
 
 Note: Legacy code uses `VITE_` prefix via `import.meta.env`. These still work in Next.js via the `VITE_` → `NEXT_PUBLIC_` aliasing in `src/lib/supabase.js`.
@@ -305,6 +304,7 @@ https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://www.ailem.uz/api/supp
 | `/api/support/message` | POST | Send user message + forward to Telegram |
 | `/api/support/messages` | GET | Poll messages by session_id |
 | `/api/support/webhook` | POST | Receive Telegram replies from admin |
+| `/api/telegram/send` | POST | Admin-only (Supabase JWT + `admin_users`) proxy for `sendMessage`/`sendPhoto` |
 
 ## Performance Optimizations
 
@@ -338,7 +338,6 @@ https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://www.ailem.uz/api/supp
 - Click payment: UI disabled (PaymentPage.jsx lines 372-432 commented out)
 - Address management, Settings page, Help section: placeholder UI only
 - Telegram Desktop: localStorage throws — in-memory fallback in `helpers.js`
-- `NEXT_PUBLIC_TELEGRAM_BOT_TOKEN` is exposed in bundle (should use server-side env var)
 - `export const dynamic = 'force-dynamic'` in root layout disables static generation
 
 ## Common Issues
