@@ -865,6 +865,76 @@ export const usersAPI = {
 };
 
 // ============================================
+// CHECKOUT (server-priced customer orders)
+// ============================================
+
+// Customer orders are priced and stored by app/api/orders (service role).
+// The browser sends ids, quantities and the delivery choice only.
+export class CheckoutError extends Error {
+  constructor(code, message, status, quote) {
+    super(message || code);
+    this.name = 'CheckoutError';
+    this.code = code;
+    this.status = status;
+    this.quote = quote || null;
+  }
+}
+
+async function postOrders(payload) {
+  let res;
+  try {
+    res = await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    throw new CheckoutError('NETWORK', "Tarmoq xatosi. Qayta urinib ko'ring", 0);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new CheckoutError(data.error || 'SERVER_ERROR', data.message, res.status, data.quote);
+  return data;
+}
+
+export const checkoutAPI = {
+  // request: { userId, items: [{productId, color, size, quantity}], delivery, useBonusPoints }
+  async quote(request) {
+    const { quote } = await postOrders({ ...request, mode: 'quote' });
+    return quote;
+  },
+  // Stores the order only if expectedTotal equals the server total;
+  // otherwise throws CheckoutError('TOTAL_MISMATCH') carrying the new quote.
+  async create(request, expectedTotal) {
+    const { order } = await postOrders({ ...request, mode: 'create', expectedTotal });
+    return order;
+  }
+};
+
+// Build the checkout request from cart items and checkout form data
+// account: 'user' for a signed-in customer — the server takes the identity
+// from the httpOnly session cookie, never from an id in this request.
+export function buildCheckoutRequest(user, cartItems, checkoutData) {
+  return {
+    account: user && !user.isGuest && user.telegramId ? 'user' : 'guest',
+    items: (cartItems || []).map(item => ({
+      productId: item.id,
+      color: item.selectedColor || null,
+      size: item.selectedSize || null,
+      quantity: item.quantity
+    })),
+    delivery: {
+      courier: checkoutData?.courier,
+      pickupPointId: checkoutData?.pickupPoint?.id ?? null,
+      district: checkoutData?.district || null,
+      address: checkoutData?.address || null,
+      fullName: checkoutData?.fullName,
+      phone: checkoutData?.phone
+    },
+    useBonusPoints: !!checkoutData?.useBonusPoints
+  };
+}
+
+// ============================================
 // ORDERS API
 // ============================================
 

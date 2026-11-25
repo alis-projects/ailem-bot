@@ -1,17 +1,38 @@
 import { useState, useContext, useEffect } from 'react';
 import { t } from "../../utils/translation-fallback";
 import { CreditCard, ArrowLeft, Loader } from 'lucide-react';
-import { formatPrice, generateOrderNumber, saveToLocalStorage, loadFromLocalStorage, removeFromLocalStorage } from '../../utils/helpers';
+import { formatPrice, saveToLocalStorage, loadFromLocalStorage, removeFromLocalStorage } from '../../utils/helpers';
 import { useCart } from '../../hooks/useCart';
 import { UserContext } from '../../context/UserContext';
-import { AdminContext } from '../../context/AdminContext';
+import { checkoutAPI, buildCheckoutRequest } from '../../services/api';
 
 import { generatePaymeLink } from '../../services/payme';
 
 const PaymentPage = ({ checkoutData, onNavigate }) => {
   const { cartItems } = useCart();
   const { user } = useContext(UserContext);
-  const { addOrder } = useContext(AdminContext);
+
+  // Amounts shown and charged come from the server (app/api/orders), priced
+  // from live catalog data — never from checkoutData's client-side numbers.
+  const [quote, setQuote] = useState(null);
+  const [quoteError, setQuoteError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [sessionRequired, setSessionRequired] = useState(false);
+
+  useEffect(() => {
+    if (!checkoutData || !user?.id || cartItems.length === 0) return;
+    let cancelled = false;
+    setQuoteError(null);
+    checkoutAPI.quote(buildCheckoutRequest(user, cartItems, checkoutData))
+      .then(q => { if (!cancelled) { setQuote(q); setSessionRequired(false); } })
+      .catch(e => {
+        if (cancelled) return;
+        setQuote(null);
+        setSessionRequired(e.code === 'SESSION_REQUIRED');
+        setQuoteError(e.message || 'Xatolik');
+      });
+    return () => { cancelled = true; };
+  }, [checkoutData, cartItems, user]);
 
   // Check if user just returned from a payment and redirect to status page
   useEffect(() => {
@@ -35,57 +56,32 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
 
   // Handler for Payme payment
   const handlePaymePayment = async () => {
+    if (!quote) return;
     try {
       setProcessingPayment(true);
+      setNotice(null);
 
-      const orderId = generateOrderNumber();
-      const paymeOrderId = `${Date.now()}${Math.floor(Math.random() * 1000)
-        .toString()
-        .padStart(3, '0')}`;
-
-      // Create pending order first
-      const order = {
-        id: orderId,
-        paymeOrderId: paymeOrderId,
-        userId: user.id,
-        userTelegramId: user.telegramId || user.id,
-        userName: user.name,
-        userPhone: user.phone || checkoutData.phone,
-        items: cartItems.map(item => ({
-          productId: item.id,
-          productName: item.name,
-          price: item.price,
-          basePrice: item.basePrice || item.price,
-          variantPrice: item.variantPrice || null,
-          quantity: item.quantity,
-          color: item.selectedColor,
-          size: item.selectedSize,
-          image: item.image
-        })),
-        deliveryInfo: {
-          fullName: checkoutData.fullName,
-          phone: checkoutData.phone,
-          address: checkoutData.address,
-          city: checkoutData.city,
-          payme_order_id: paymeOrderId
-        },
-        courier: {
-          name: checkoutData.courier || 'N/A',
-          duration: checkoutData.type === 'home_delivery' ? 'Home Delivery' : 'Pickup'
-        },
-        subtotal: checkoutData.subtotal,
-        bonusDiscount: checkoutData.bonusDiscount,
-        bonusPointsUsed: checkoutData.bonusPointsUsed,
-        deliveryFee: checkoutData.deliveryFee,
-        total: checkoutData.total,
-        shippingPaymentType: checkoutData.shippingPaymentType || 'prepaid',
-        paymentMethod: 'payme',
-        status: 'pending',
-        date: new Date().toISOString().split('T')[0],
-        createdAt: new Date().toISOString()
-      };
-
-      await addOrder(order);
+      // The server prices and stores the order; it refuses (409) if the
+      // amount shown here is no longer the amount it would charge.
+      let order;
+      try {
+        order = await checkoutAPI.create(buildCheckoutRequest(user, cartItems, checkoutData), quote.total);
+      } catch (e) {
+        if (e.code === 'SESSION_REQUIRED') {
+          setQuote(null);
+          setSessionRequired(true);
+          setQuoteError(e.message);
+          return;
+        }
+        if (e.code === 'TOTAL_MISMATCH' && e.quote) {
+          setQuote(e.quote);
+          setNotice("Buyurtma summasi yangilandi. Yangi summani tekshirib, qayta to'lang.");
+          return;
+        }
+        throw e;
+      }
+      const orderId = order.orderNumber;
+      const paymeOrderId = order.paymeOrderId;
 
       // Build return URL using pathname routing
       const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.ailem.uz';
@@ -93,7 +89,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
 
       const paymentUrl = generatePaymeLink({
         orderId: paymeOrderId,
-        amount: checkoutData.total,
+        amount: order.total,
         description: `Order #${orderId} - ${cartItems.length} items`,
         account: {
           order_id: paymeOrderId
@@ -149,10 +145,26 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
       <div className="p-4 space-y-6">
         <h2 className="text-2xl font-bold">{t('payment.title')}</h2>
 
+        {quoteError && (
+          <div role="alert" className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
+            Buyurtmani hisoblab bo'lmadi: {quoteError}
+            {sessionRequired && (
+              <button type="button" onClick={() => onNavigate('login')} className="block mt-2 font-semibold underline">
+                Telegram orqali kirish
+              </button>
+            )}
+          </div>
+        )}
+        {notice && (
+          <div role="status" className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-3 text-sm">
+            {notice}
+          </div>
+        )}
+
         {/* Order Total */}
         <div className="bg-gradient-to-r from-accent to-red-700 text-white rounded-lg shadow-lg p-6 text-center">
           <p className="text-sm mb-2">{t('payment.totalAmount')}</p>
-          <p className="text-4xl font-bold">{formatPrice(checkoutData.total)}</p>
+          <p className="text-4xl font-bold">{quote ? formatPrice(quote.total) : '…'}</p>
         </div>
 
         {/* Payme Payment Info */}
@@ -181,25 +193,25 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-gray-600">{t('payment.subtotal')}</span>
-              <span>{formatPrice(checkoutData.subtotal)}</span>
+              <span>{quote ? formatPrice(quote.subtotal) : '…'}</span>
             </div>
 
-            {checkoutData.bonusDiscount > 0 && (
+            {quote?.bonusDiscount > 0 && (
               <div className="flex justify-between text-success">
                 <span>{t('payment.bonusDiscount')}</span>
-                <span>-{formatPrice(checkoutData.bonusDiscount)}</span>
+                <span>-{formatPrice(quote.bonusDiscount)}</span>
               </div>
             )}
 
             <div className="flex justify-between">
               <span className="text-gray-600">{t('payment.delivery')} ({checkoutData.courier})</span>
-              <span>{formatPrice(checkoutData.deliveryFee)}</span>
+              <span>{quote ? formatPrice(quote.deliveryFee) : '…'}</span>
             </div>
 
             <div className="border-t border-gray-300 pt-2 mt-2">
               <div className="flex justify-between text-lg font-bold">
                 <span>{t('payment.total')}</span>
-                <span className="text-primary">{formatPrice(checkoutData.total)}</span>
+                <span className="text-primary">{quote ? formatPrice(quote.total) : '…'}</span>
               </div>
             </div>
           </div>
@@ -211,7 +223,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
         <div className="max-w-7xl mx-auto">
           <button
             onClick={handlePaymePayment}
-            disabled={processingPayment}
+            disabled={processingPayment || !quote}
             className="w-full bg-accent text-white py-4 rounded-lg font-bold text-lg hover:bg-red-700 transition-colors disabled:opacity-50"
           >
             {processingPayment ? (

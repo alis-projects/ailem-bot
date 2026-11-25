@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '../../../../src/lib/supabase-server';
 import { rateLimit } from '../../../../src/lib/rate-limit';
+import { SESSION_COOKIE, getSessionSecret, sessionCookieOptions, signSession } from '../../../../src/lib/customerSession';
 
 function generateReferralCode(name) {
   const prefix = (name || 'user').replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase();
@@ -126,7 +127,17 @@ export async function POST(request) {
       cart: dbUser.cart || [],
     };
 
-    return NextResponse.json({ user: appUser });
+    // Server-verified session for routes that act on the buyer's behalf
+    // (checkout, bonus use). Without the secret, login still returns the user
+    // but checkout treats them as signed out (SESSION_REQUIRED).
+    const response = NextResponse.json({ user: appUser });
+    const secret = getSessionSecret();
+    if (secret) {
+      response.cookies.set(SESSION_COOKIE, signSession({ uid: dbUser.id, tid: dbUser.telegram_id }, secret), sessionCookieOptions(request));
+    } else {
+      console.error('CUSTOMER_SESSION_SECRET is not configured: no customer session issued');
+    }
+    return response;
   } catch (error) {
     console.error('Telegram login error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

@@ -201,6 +201,8 @@ export const UserProvider = ({ children }) => {
 
   // Logout — revert to guest
   const logout = useCallback(() => {
+    // End the server-verified session too (httpOnly cookie)
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     removeFromLocalStorage('cachedUser');
     removeFromLocalStorage('favorites');
     removeFromLocalStorage('cart');
@@ -326,6 +328,7 @@ export const UserProvider = ({ children }) => {
   }, [favoritesSet]);
 
   const clearUserData = useCallback(() => {
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     removeFromLocalStorage('cachedUser');
     removeFromLocalStorage('favorites');
   }, []);
