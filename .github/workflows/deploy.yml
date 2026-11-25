@@ -74,6 +74,10 @@ jobs:
           script: |
             set -e
             cd /opt/ailem
+            # Server routes read the bot token at runtime only (it is no longer
+            # baked into the image). Abort before touching the running container
+            # if it is missing. Prints no values.
+            grep -q '^TELEGRAM_BOT_TOKEN=.' .env || { echo "ABORT: TELEGRAM_BOT_TOKEN missing in /opt/ailem/.env; old container left running"; exit 1; }
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             export GHCR_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TAG=sha-$(echo "${{ github.sha }}" | cut -c1-7)
