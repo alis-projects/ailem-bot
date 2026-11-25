@@ -1,7 +1,7 @@
 import { createContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { essentialDataAPI, categoriesAPI, productsAPI, ordersAPI, reviewsAPI, usersAPI, storageAPI, extractStoragePath, isDefinitiveError } from '../services/api';
-import { decreaseVariantStock, updateVariantStock, getTotalVariantStock } from '../utils/variants';
+import { updateVariantStock, getTotalVariantStock } from '../utils/variants';
 import { removeFromLocalStorage } from '../utils/helpers';
 import { sortCategories, countProductsInCategory } from '../utils/categories';
 import { categoryNameKey } from '../utils/validation';
@@ -226,59 +226,45 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
-  const approveOrder = async (orderId, onReferralReward) => {
-    try {
-      const order = orders.find(o => o.id === orderId);
-      await updateOrderStatus(orderId, 'approved');
-
-      // Deduct stock for each item in the order
-      if (order && order.items) {
-        for (const item of order.items) {
-          const product = products.find(p => p.id === item.id);
-          if (!product) continue;
-
-          // Check if product uses variant tracking
-          if (product.variants && product.variants.length > 0 && item.selectedColor && item.selectedSize) {
-            // Deduct variant stock
-            const updatedVariants = decreaseVariantStock(
-              product.variants,
-              item.selectedColor,
-              item.selectedSize,
-              item.quantity
-            );
-
-            // Update product with new variant stock
-            await updateProduct(product.id, { variants: updatedVariants });
-            console.log(`📦 Deducted ${item.quantity} units from ${item.selectedColor} • ${item.selectedSize} variant of ${product.name}`);
-          } else {
-            // Deduct regular stock
-            const newStock = Math.max(0, (product.stock || 0) - item.quantity);
-            await updateProduct(product.id, { stock: newStock });
-            console.log(`📦 Deducted ${item.quantity} units from ${product.name} stock`);
-          }
-        }
-      }
-
-      // Send notification to customer
-      if (order) {
-        try {
-          const { notifyUserOrderStatus } = await import('../services/telegram');
-          await notifyUserOrderStatus(order, 'approved');
-          console.log('✅ Customer notified about order approval');
-        } catch (notifError) {
-          console.error('❌ Failed to send customer notification:', notifError);
-          // Don't fail the approval if notification fails
-        }
-      }
-
-      // Call referral reward callback if provided
-      if (onReferralReward && order) {
-        onReferralReward(order);
-      }
-    } catch (err) {
-      console.error('Failed to approve order:', err);
+  // Manual approval runs in the database (admin_approve_order): stock check,
+  // status change, stock deduction and bonuses in ONE transaction, exactly once
+  // (the same fulfillment Payme/Click use). Throws an Error with .code
+  // 'insufficient_stock' (+ .items) / 'already_fulfilled' / 'not_pending' /
+  // 'not_found' when nothing was changed. Returns { referrer } when a referral
+  // commission was credited (for the Telegram notification).
+  const approveOrder = async (orderId) => {
+    const order = orders.find(o => o.id === orderId || o.dbId === orderId);
+    const result = await ordersAPI.approveAsAdmin(order?.dbId || orderId);
+    if (result?.result !== 'approved') {
+      const err = new Error(`approve_${result?.result || 'failed'}`);
+      err.code = result?.result || 'failed';
+      err.items = result?.items || [];
+      err.status = result?.status;
       throw err;
     }
+
+    // Reflect the database state (order + stock) in the admin lists
+    try {
+      const fresh = await ordersAPI.getById(order?.dbId || orderId);
+      setOrders(prev => prev.map(o => (o.id === orderId || o.dbId === orderId) ? fresh : o));
+    } catch (e) {
+      console.error('Failed to reload approved order:', e);
+    }
+    try {
+      await refreshCatalog();
+    } catch (e) {
+      console.error('Failed to reload products after approval:', e);
+    }
+
+    if (order) {
+      try {
+        const { notifyUserOrderStatus } = await import('../services/telegram');
+        await notifyUserOrderStatus(order, 'approved');
+      } catch (notifError) {
+        console.error('❌ Failed to send customer notification:', notifError);
+      }
+    }
+    return { referrer: result.referrer || null };
   };
 
   const rejectOrder = async (orderId, onRefundBonus) => {

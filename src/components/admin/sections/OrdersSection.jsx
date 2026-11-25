@@ -11,7 +11,6 @@ import { exportOrders, exportOrderItems } from '../../../utils/csvExport';
 import { notifyUserOrderStatus, notifyReferrerReward } from '../../../services/telegram';
 import { printShippingLabel, printMultipleLabels } from '../../../utils/shippingLabel';
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
-import { usersAPI } from '../../../services/api';
 
 const OrdersSection = ({ onImageClick }) => {
   const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, updateUserBonusPoints } = useContext(AdminContext);
@@ -61,6 +60,20 @@ const OrdersSection = ({ onImageClick }) => {
     return 'a-pill-info';
   };
 
+  // Readable reason when the database refused an approval (nothing changed)
+  const approveErrorMessage = (error) => {
+    if (error?.code === 'insufficient_stock') {
+      const list = (error.items || []).map(i =>
+        `${i.name || i.productId}${i.color ? ` (${i.color}${i.size ? ` / ${i.size}` : ''})` : ''}: ${i.available ?? 0} / ${i.requested ?? '?'}`
+      ).join('; ');
+      return `Omborda yetarli mahsulot yo'q, buyurtma o'zgartirilmadi. ${list}`;
+    }
+    if (error?.code === 'already_fulfilled' || error?.code === 'not_pending') {
+      return `Buyurtma allaqachon qayta ishlangan (${error.status || 'holat o\'zgargan'}). Ro'yxatni yangilang.`;
+    }
+    return 'Buyurtmani tasdiqlashda xatolik. Qayta urinib ko\'ring.';
+  };
+
   const handleApprove = async (orderId) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
@@ -75,48 +88,20 @@ const OrdersSection = ({ onImageClick }) => {
 
     if (confirmed) {
       try {
-        await approveOrder(orderId);
+        // Stock, bonuses and status are applied by the database in one
+        // transaction (admin_approve_order); the customer is notified there too.
+        const { referrer } = await approveOrder(orderId);
         toast.success('Buyurtma muvaffaqiyatli tasdiqlandi');
-
-        if (order.userId) {
+        if (referrer?.telegram_id && referrer.commission > 0) {
           try {
-            const bonusConfig = loadFromLocalStorage('bonusConfig', { purchaseBonus: 1, referralCommission: 3 });
-            const purchaseBonusPercentage = bonusConfig?.purchaseBonus || 1;
-            const purchaseBonusPoints = Math.round(((order.subtotal || order.total) * purchaseBonusPercentage) / 100);
-
-            // Deduct bonus points that were used in this order
-            if (order.bonusPointsUsed > 0) {
-              await updateUserBonusPoints(order.userId, -order.bonusPointsUsed);
-            }
-
-            await updateUserBonusPoints(order.userId, purchaseBonusPoints);
-
-            const customer = await usersAPI.getById(order.userId);
-            if (customer && customer.referred_by) {
-              const referrer = await usersAPI.getByReferralCode(customer.referred_by);
-              if (referrer) {
-                const commissionPercentage = bonusConfig?.referralCommission || 3;
-                const commissionAmount = Math.round(((order.subtotal || order.total) * commissionPercentage) / 100);
-                const newReferrals = (referrer.referrals || 0) + 1;
-                const newBonusPoints = (referrer.bonus_points || 0) + commissionAmount;
-
-                await usersAPI.update(referrer.id, {
-                  referrals: newReferrals,
-                  bonus_points: newBonusPoints
-                });
-
-                await notifyReferrerReward(referrer, commissionAmount, newReferrals);
-              }
-            }
-          } catch (bonusError) {
-            console.error('❌ Failed to award bonus points:', bonusError);
+            await notifyReferrerReward(referrer, referrer.commission, referrer.referrals || 0);
+          } catch (notifyError) {
+            console.error('❌ Failed to notify referrer:', notifyError);
           }
         }
-
-        await notifyUserOrderStatus(order, 'approved');
       } catch (error) {
         console.error('❌ Failed to approve order:', error);
-        toast.error('Buyurtmani tasdiqlashda xatolik. Qayta urinib ko\'ring.');
+        toast.error(approveErrorMessage(error));
       }
     }
   };
