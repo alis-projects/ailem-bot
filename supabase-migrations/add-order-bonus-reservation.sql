@@ -15,7 +15,7 @@
 --     the order with bonus_reserved = points, bonus_reservation = 'held'.
 --   * trigger orders_bonus_reservation (BEFORE UPDATE), exactly once per order:
 --       held -> spent     when the order is paid/approved (fulfilled_at set or
---                         status approved/shipped/delivered); balance already
+--                         status approved/shipped/delivered/completed); balance already
 --                         reduced, nothing else to do
 --       held -> released  when the order is rejected/cancelled/failed before
 --                         that; the points go back to the buyer
@@ -73,7 +73,7 @@ BEGIN
 
   IF OLD.bonus_reservation = 'held' THEN
     IF (NEW.fulfilled_at IS NOT NULL AND OLD.fulfilled_at IS NULL)
-       OR NEW.status IN ('approved', 'shipped', 'delivered') THEN
+       OR NEW.status IN ('approved', 'shipped', 'delivered', 'completed') THEN
       NEW.bonus_reservation := 'spent';
     ELSIF NEW.status IN ('rejected', 'cancelled', 'failed') THEN
       IF OLD.bonus_reserved > 0 AND NEW.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
@@ -105,6 +105,8 @@ DECLARE
   v_points integer := COALESCE((p_order ->> 'bonus_points_used')::integer, 0);
   v_user text := p_order ->> 'user_id';
   v_left integer;
+  v_row jsonb;
+  v_cols text;
 BEGIN
   IF p_order IS NULL OR jsonb_typeof(p_order) <> 'object' OR v_points < 0 THEN
     RETURN jsonb_build_object('result', 'bad_request');
@@ -123,12 +125,21 @@ BEGIN
     END IF;
   END IF;
 
+  v_row := p_order - 'fulfilled_at' - 'fulfilled_by'
+           || jsonb_build_object('bonus_reserved', v_points,
+                                 'bonus_reservation', CASE WHEN v_points > 0 THEN 'held' END,
+                                 'created_at', now());
+  -- Insert only the columns present in p_order (and existing in the table), so
+  -- column defaults (payme_state, is_first_order, payment_method, ...) apply to
+  -- the rest and unknown keys are ignored.
+  SELECT string_agg(quote_ident(c.column_name), ', ' ORDER BY c.ordinal_position)
+    INTO v_cols
+  FROM information_schema.columns c
+  WHERE c.table_schema = 'public' AND c.table_name = 'orders' AND v_row ? c.column_name;
+
   PERFORM set_config('ailem.reserving_bonus', 'on', true);
-  INSERT INTO public.orders
-  SELECT * FROM jsonb_populate_record(NULL::public.orders,
-    p_order || jsonb_build_object('bonus_reserved', v_points,
-                                  'bonus_reservation', CASE WHEN v_points > 0 THEN 'held' END,
-                                  'created_at', now(), 'fulfilled_at', NULL));
+  EXECUTE format('INSERT INTO public.orders (%s) SELECT %s FROM jsonb_populate_record(NULL::public.orders, $1)', v_cols, v_cols)
+    USING v_row;
   PERFORM set_config('ailem.reserving_bonus', 'off', true);
   RETURN jsonb_build_object('result', 'created', 'bonus_left', v_left);
 END;
