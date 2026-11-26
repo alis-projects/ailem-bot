@@ -8,6 +8,7 @@ import { AdminContext } from '../context/AdminContext';
 import { productsAPI } from '../services/api';
 import ProductsSection from '../components/admin/sections/ProductsSection';
 import { stockError, tiersError } from '../utils/productForm';
+import { priceOrder, SELF_PICKUP_COURIER } from '../lib/orderPricing';
 
 const m = vi.hoisted(() => ({
   db: { products: new Map(), reviews: [] },
@@ -433,6 +434,92 @@ describe('15: bulk-price tiers', () => {
     await click(button('Yangilash'));
     await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
     expect(m.db.products.get('p1').variants).toEqual([{ ...variants[0], volume_pricing: [{ min_qty: 3, max_qty: 9, price: 65000 }, { min_qty: 10, max_qty: null, price: 60000 }] }]);
+  });
+});
+
+describe('shared bulk prices of a product with variants', () => {
+  // As the 6 production pillowcases: shared 5+ tier, variants without own tiers
+  const SHARED = [{ min_qty: 5, max_qty: null, price: 30000 }];
+  const variants = () => [
+    { variant_id: 'va', color: 'Binafsha', size: '50x70', stock: 20, price: 0, barcode: '111', volume_pricing: null },
+    { variant_id: 'vb', color: 'Kulrang', size: '50x70', stock: 20, price: 40000, barcode: '222', volume_pricing: [{ min_qty: 3, max_qty: null, price: 36000 }] }
+  ];
+  const row = (over = {}) => dbRow({ price: 35000, stock: 0, colors: ['Binafsha', 'Kulrang'], sizes: ['50x70'], volume_pricing: SHARED, variants: variants(), ...over });
+  const quote = () => priceOrder({
+    products: [m.db.products.get('p1')],
+    delivery: { courier: SELF_PICKUP_COURIER },
+    lines: [
+      { productId: 'p1', variantId: 'va', quantity: 5 },   // inherits 5+ = 30 000
+      { productId: 'p1', variantId: 'vb', quantity: 3 }    // own 3+ = 36 000
+    ]
+  });
+
+  test('changing only the description keeps the shared tiers and every variant; the server price stays the same', async () => {
+    m.db.products = new Map([['p1', row()]]);
+    const before = quote();
+    expect(before.items.map(i => i.price)).toEqual([30000, 36000]);
+    const variantsBefore = structuredClone(m.db.products.get('p1').variants);
+
+    const ctx = await openEdit();
+    set(screen.getByLabelText('Tavsif'), '<p>Yangi tavsif</p>');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+
+    const stored = m.db.products.get('p1');
+    expect(stored.description).toBe('<p>Yangi tavsif</p>');
+    expect(stored.volume_pricing).toEqual(SHARED);
+    expect(stored.variants).toEqual(variantsBefore);
+    const after = quote();
+    expect(after.items.map(i => i.price)).toEqual(before.items.map(i => i.price));
+    expect(after.subtotal).toBe(before.subtotal);
+    expect(after.total).toBe(before.total);
+  });
+
+  test('the shared tiers are shown and editable for a product with variants', async () => {
+    m.db.products = new Map([['p1', row()]]);
+    const ctx = await openEdit();
+    expect(screen.getByText('Umumiy hajmli narxlash (variantlar uchun)')).toBeTruthy();
+    expect(screen.getAllByLabelText('Min miqdor')[0].value).toBe('5');
+    expect(screen.getByText(/Hajm narxi.*umumiy/)).toBeTruthy();       // Binafsha: inherits
+    expect(screen.getByText(/Hajm narxi.*\(1\)/)).toBeTruthy();         // Kulrang: own tier
+    set(screen.getAllByLabelText('Har bir narxi')[0], '29000');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(m.db.products.get('p1').volume_pricing).toEqual([{ min_qty: 5, max_qty: null, price: 29000 }]);
+    expect(quote().items.map(i => i.price)).toEqual([29000, 36000]);
+  });
+
+  test('a shared tier above the price of a variant that inherits it is refused', async () => {
+    m.db.products = new Map([['p1', row({ variants: [
+      { variant_id: 'va', color: 'Binafsha', size: '50x70', stock: 20, price: 28000, volume_pricing: null },
+      { variant_id: 'vb', color: 'Kulrang', size: '50x70', stock: 20, price: 0, volume_pricing: null }
+    ] })]]);
+    const ctx = await openEdit();
+    await click(button('Yangilash'));
+    expect(screen.getByRole('alert').textContent).toContain("Binafsha / 50x70 (umumiy narxlar): Hajm narxi oddiy narxdan (28000) yuqori bo'lmasligi kerak (5+)");
+    expect(ctx.updateProduct).not.toHaveBeenCalled();
+  });
+
+  test('a variant with its own tiers is not checked against the shared ones', async () => {
+    // shared 30 000 > Kulrang's 25 000, but Kulrang uses its own 3+ = 24 000
+    m.db.products = new Map([['p1', row({ variants: [
+      { variant_id: 'va', color: 'Binafsha', size: '50x70', stock: 20, price: 0, volume_pricing: null },
+      { variant_id: 'vb', color: 'Kulrang', size: '50x70', stock: 20, price: 25000, volume_pricing: [{ min_qty: 3, max_qty: null, price: 24000 }] }
+    ] })]]);
+    const ctx = await openEdit();
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(m.db.products.get('p1').volume_pricing).toEqual(SHARED);
+  });
+
+  test('removing all shared tiers stores null and inheriting variants pay the regular price', async () => {
+    m.db.products = new Map([['p1', row()]]);
+    const ctx = await openEdit();
+    await click(screen.getAllByLabelText("Darajani o'chirish")[0]);
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(m.db.products.get('p1').volume_pricing).toBeNull();
+    expect(quote().items.map(i => i.price)).toEqual([35000, 36000]);
   });
 });
 

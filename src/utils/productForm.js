@@ -123,5 +123,9 @@ export const tiersError = (tiers, basePrice) => {
   return null;
 };
 
+// A variant with its own non-empty tiers uses them; otherwise it inherits the
+// product's shared tiers (same rule as src/lib/orderPricing.js)
+export const hasOwnTiers = (variant) => Array.isArray(variant?.volume_pricing) && variant.volume_pricing.length > 0;
+
 // What the form state plus images look like, to detect unsaved changes
 export const formSnapshot = (formData, images) => JSON.stringify({ formData, images });
