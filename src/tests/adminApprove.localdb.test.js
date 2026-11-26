@@ -150,8 +150,10 @@ describe.skipIf(!enabled)('local stack: admin_approve_order', () => {
     for (let i = 0; i < 4; i++) {
       const o = await order([{ productId: simpleId, quantity: 1 }], { total: 50000 });
       const tx = `${tag}-tx-${i}`;
-      expect((await payme('CreateTransaction', { id: tx, time: Date.now(), amount: 50000 * 100, account: { order_id: o.payme_order_id } })).result?.state).toBe(1);
+      // measured before CreateTransaction: since add-stock-reservation.sql the
+      // unit is reserved there, and neither side may take it a second time
       const stockBefore = (await product(simpleId)).stock;
+      expect((await payme('CreateTransaction', { id: tx, time: Date.now(), amount: 50000 * 100, account: { order_id: o.payme_order_id } })).result?.state).toBe(1);
       const bal = await balance();
       const [adm, pm] = await Promise.all([approve(o.n), payme('PerformTransaction', { id: tx })]);
       outcomes.push(`${adm.result}/${pm.result ? 'performed' : 'refused'}`);

@@ -249,6 +249,19 @@ async function checkPerformTransaction(params, requestId) {
     });
   }
 
+  // Stock (advisory too): CreateTransaction reserves it under row locks
+  const { data: shortages, error: stockError } = await getSupabase()
+    .rpc('order_stock_shortages', { p_payme_order_id: paymeOrderId });
+  if (stockError) {
+    console.error('order_stock_shortages failed:', stockError);
+    return NextResponse.json({
+      jsonrpc: '2.0',
+      id: requestId,
+      error: { code: -31008, message: 'Stock check failed' },
+    });
+  }
+  if (Array.isArray(shortages) && shortages.length > 0) return outOfStock(requestId);
+
   return NextResponse.json({ jsonrpc: '2.0', id: requestId, result: { allow: true } });
 }
 
@@ -295,6 +308,8 @@ async function createTransaction(params, requestId) {
         id: requestId,
         error: { code: -31001, message: `Incorrect amount. Expected ${data.expected} tiyin, got ${amount} tiyin` },
       });
+    case 'out_of_stock':
+      return outOfStock(requestId);
     default:
       return NextResponse.json({
         jsonrpc: '2.0',
@@ -302,6 +317,24 @@ async function createTransaction(params, requestId) {
         error: { code: -31051, message: 'Order already paid or being paid' },
       });
   }
+}
+
+// Not enough stock for the order: Payme shows the message and does not
+// charge (account errors are -31050..-31099).
+function outOfStock(requestId) {
+  return NextResponse.json({
+    jsonrpc: '2.0',
+    id: requestId,
+    error: {
+      code: -31052,
+      message: {
+        uz: 'Buyurtmadagi mahsulot omborda qolmadi',
+        ru: 'Товара из заказа нет в наличии',
+        en: 'Ordered item is out of stock',
+      },
+      data: 'order_id',
+    },
+  });
 }
 
 async function performTransaction(params, requestId) {

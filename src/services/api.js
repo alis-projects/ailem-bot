@@ -957,6 +957,11 @@ export const ordersAPI = {
       bonusPointsUsed: order.bonus_points_used,
       deliveryFee: order.delivery_fee,
       paymeOrderId: order.payme_order_id,
+      paymeTransactionId: order.payme_transaction_id,
+      // Set by reconcile_payment_reservations(): check this order in the
+      // Payme merchant cabinet (stock and bonus stay reserved until then)
+      paymeReviewRequiredAt: order.payme_review_required_at || null,
+      paymeReviewReason: order.payme_review_reason || null,
       clickOrderId: order.click_order_id,
       // Cash/POS payment fields
       paymentMethod: order.payment_method,
