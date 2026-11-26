@@ -1,3 +1,15 @@
+/* Fallback face for Plus Jakarta Sans (app/layout.jsx, next/font/local), shown
+   only until the self-hosted font has loaded. Same metrics Google Fonts
+   generated for this family before it was self-hosted. */
+@font-face {
+  font-family: 'Plus Jakarta Sans Fallback';
+  src: local('Arial');
+  ascent-override: 98.88%;
+  descent-override: 21.15%;
+  line-gap-override: 0.00%;
+  size-adjust: 104.98%;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
