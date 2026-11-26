@@ -9,6 +9,7 @@
 //   npx vitest run src/tests/stockReservation.localdb.test.js
 //
 // Creates synthetic products and guest orders; deletes everything afterwards.
+import crypto from 'crypto';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
 
@@ -252,5 +253,146 @@ describe.skipIf(!enabled)('local stack: stock is checked at checkout and reserve
     // anon cannot read the check function
     const anon = createClient(env.url, env.anon, { auth: { persistSession: false } });
     expect((await anon.rpc('order_stock_shortages', { p_payme_order_id: o.paymeOrderId })).error?.code).toBe('42501');
+  });
+
+  // ---------------------------------------------------------------- reconcile
+  // reconcile_payment_reservations() normally runs from pg_cron every 15 min
+  // with p_age = 13 h; here it is called directly with p_age = 0 so the
+  // reservations just made count as old.
+  describe('stale reservations (Payme notification never arrived)', () => {
+    let buyerId;
+    const purchase = { pct: 1 };
+    const reconcile = async () => {
+      const { data, error } = await service.rpc('reconcile_payment_reservations', { p_age: '0 seconds' });
+      if (error) throw error;
+      return data;
+    };
+    const balance = async () => (await service.from('users').select('bonus_points').eq('id', buyerId).single()).data.bonus_points;
+    const full = async (o) => (await service.from('orders')
+      .select('status, fulfilled_at, payme_state, stock_reservation, bonus_reservation, payme_review_required_at, payme_review_reason')
+      .eq('order_number', o.orderNumber).single()).data;
+    // Pending order of a signed-in buyer holding 10 000 bonus points, created
+    // like /api/orders does, then bound to Payme (stock reserved)
+    const reservedPaymeOrder = async (productId) => {
+      await service.from('users').update({ bonus_points: 10000 }).eq('id', buyerId);
+      const orderNumber = `${tag}-rec-${orders.length + 1}`;
+      const paymeOrderId = `${Date.now()}${String(orders.length).padStart(3, '0')}`;
+      orders.push(orderNumber);
+      const { data, error } = await service.rpc('create_customer_order', { p_order: {
+        id: crypto.randomUUID(), order_number: orderNumber, user_id: buyerId, user_name: 'Reconcile', user_phone: '+998900000000',
+        items: [{ productId, quantity: 1 }], delivery_info: { type: 'self_pickup' }, subtotal: 50000, delivery_fee: 0,
+        bonus_points_used: 10000, bonus_discount: 10000, total: 40000, status: 'pending', payme_order_id: paymeOrderId, payment_method: 'payme'
+      } });
+      if (error || data.result !== 'created') throw error || new Error(JSON.stringify(data));
+      const o = { orderNumber, paymeOrderId, total: 40000 };
+      expect((await createTx(o)).result.state).toBe(1);
+      return o;
+    };
+
+    beforeAll(async () => {
+      const { data, error } = await service.from('users')
+        .insert({ name: 'Reconcile Buyer', telegram_id: String(9_300_000_000 + Math.floor(Math.random() * 1e6)), referral_code: `${tag}-rb`, bonus_points: 0 })
+        .select('id').single();
+      if (error) throw error;
+      buyerId = data.id;
+      purchase.pct = Number((await service.from('app_settings').select('bonus_config').eq('id', 1).single()).data.bonus_config?.purchaseBonus) || 1;
+    });
+    afterAll(async () => {
+      if (!buyerId) return;
+      await service.from('orders').delete().eq('user_id', buyerId);
+      await service.from('users').delete().eq('id', buyerId);
+    });
+
+    test('missed cancel: marked for manual Payme check, reservation kept; a late CancelTransaction returns stock and bonus once; repeats change nothing', async () => {
+      const id = await product(1);
+      const o = await reservedPaymeOrder(id);
+      expect((await stockOf(id)).stock).toBe(0);
+      expect(await balance()).toBe(0);
+
+      const first = await reconcile();
+      expect(first.flagged).toBeGreaterThanOrEqual(1);
+      let r = await full(o);
+      expect(r).toMatchObject({ status: 'pending', payme_state: 1, stock_reservation: 'held', bonus_reservation: 'held' });
+      expect(r.payme_review_required_at).not.toBeNull();
+      expect(r.payme_review_reason).toContain('Payme kabinetida tekshiring');
+      expect((await stockOf(id)).stock).toBe(0);  // kept
+      expect(await balance()).toBe(0);            // kept
+      const flaggedAt = r.payme_review_required_at;
+      await reconcile();                          // next cron run: not re-flagged, nothing released
+      expect((await full(o)).payme_review_required_at).toBe(flaggedAt);
+      expect((await stockOf(id)).stock).toBe(0);
+
+      // Payme's cancellation arrives late -> confirmed: give back once
+      expect((await cancel(o, 4)).result.state).toBe(-1);
+      r = await full(o);
+      expect(r).toMatchObject({ status: 'rejected', stock_reservation: 'released', bonus_reservation: 'released' });
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+      // repeated CancelTransaction and further cron runs: nothing more
+      const again = await cancel(o, 4);
+      expect(again.result.state).toBe(-1);
+      await reconcile();
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+      // a PerformTransaction after the cancel is refused
+      expect((await perform(o)).error).toBeTruthy();
+      expect((await full(o)).status).toBe('rejected');
+      expect((await stockOf(id)).stock).toBe(1);
+    }, 30_000);
+
+    test('late PerformTransaction after the order was marked: paid and fulfilled once, stock not deducted again', async () => {
+      const id = await product(1);
+      const o = await reservedPaymeOrder(id);
+      await reconcile();
+      expect((await full(o)).payme_review_required_at).not.toBeNull();
+      expect((await perform(o)).result.state).toBe(2);
+      const r = await full(o);
+      expect(r).toMatchObject({ status: 'approved', stock_reservation: 'consumed', bonus_reservation: 'spent' });
+      expect(r.fulfilled_at).not.toBeNull();
+      expect((await stockOf(id)).stock).toBe(0);
+      expect(await balance()).toBe(Math.round(50000 * purchase.pct / 100)); // reserved 10 000 spent, purchase bonus credited once
+      expect((await perform(o)).result.state).toBe(2);   // Payme retry
+      await reconcile();                                  // approved orders are not touched
+      expect((await stockOf(id)).stock).toBe(0);
+      expect((await full(o)).status).toBe('approved');
+    }, 30_000);
+
+    test('Payme cancellation already recorded but the reservation still held: the sweep releases stock and bonus exactly once', async () => {
+      const id = await product(1);
+      const o = await reservedPaymeOrder(id);
+      // the order row says Payme cancelled (state -1) while the order is still pending
+      await service.from('orders').update({ payme_state: -1, payme_cancel_reason: 4 }).eq('order_number', o.orderNumber);
+      expect((await full(o)).stock_reservation).toBe('held');
+      const res = await reconcile();
+      expect(res.released).toBeGreaterThanOrEqual(1);
+      expect(await full(o)).toMatchObject({ status: 'rejected', stock_reservation: 'released', bonus_reservation: 'released' });
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+      await reconcile();
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+    });
+
+    test('after manual check in the Payme cabinet the admin rejects: stock and bonus back once; late Perform refused, late Cancel changes nothing', async () => {
+      const id = await product(1);
+      const o = await reservedPaymeOrder(id);
+      await reconcile();
+      const { data, error } = await admin.rpc('admin_reject_order', { p_ref: o.orderNumber });
+      expect(error).toBeNull();
+      expect(data.result).toBe('rejected');
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+      expect((await perform(o)).error).toBeTruthy();
+      expect((await cancel(o)).result.state).toBe(-1);
+      expect((await cancel(o)).result.state).toBe(-1);
+      expect((await stockOf(id)).stock).toBe(1);
+      expect(await balance()).toBe(10000);
+    }, 30_000);
+
+    test('only the server may run the sweep', async () => {
+      const anon = createClient(env.url, env.anon, { auth: { persistSession: false } });
+      expect((await anon.rpc('reconcile_payment_reservations', { p_age: '0 seconds' })).error?.code).toBe('42501');
+      expect((await admin.rpc('reconcile_payment_reservations', { p_age: '0 seconds' })).error?.code).toBe('42501');
+    });
   });
 });

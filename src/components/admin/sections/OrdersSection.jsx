@@ -75,6 +75,10 @@ const OrdersSection = ({ onImageClick }) => {
   };
 
   // An already processed order cannot be rejected until a return flow exists
+  // Payme transaction open far past Payme's timeout: reconcile manually in
+  // the Payme merchant cabinet (see reconcile_payment_reservations)
+  const needsPaymeReview = (order) => order.status === 'pending' && !!order.paymeReviewRequiredAt;
+
   const rejectErrorMessage = (error) => {
     if (error?.code === 'already_processed') {
       return `Buyurtma allaqachon qayta ishlangan (${error.status ? getStatusLabel(error.status) : 'to\'langan'}), uni rad etib bo'lmaydi: mahsulot va bonuslarni qaytarish hali qo'llab-quvvatlanmaydi. Holat o'zgartirilmadi.`;
@@ -536,6 +540,11 @@ const OrdersSection = ({ onImageClick }) => {
                           POS
                         </span>
                       )}
+                      {needsPaymeReview(order) && (
+                        <span className="a-pill a-pill-danger" title={order.paymeReviewReason || ''}>
+                          Payme: tekshiring
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td style={{ color: 'var(--text)' }}>{order.userName}</td>
@@ -798,6 +807,17 @@ const OrdersSection = ({ onImageClick }) => {
                       <span className="text-lg font-bold a-num" style={{ color: 'var(--accent-ink)' }}>{formatPrice(selectedOrder.total)}</span>
                     </div>
                   </div>
+
+                  {needsPaymeReview(selectedOrder) && (
+                    <div role="alert" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)', color: 'var(--danger)' }}>
+                      <div className="font-medium">Payme kabinetida tekshirish kerak</div>
+                      <div>{selectedOrder.paymeReviewReason}</div>
+                      {selectedOrder.paymeTransactionId && (
+                        <div className="a-muted">Tranzaksiya: {selectedOrder.paymeTransactionId}</div>
+                      )}
+                      <div className="a-muted">Mahsulot va bonuslar shu buyurtma uchun band qilingan.</div>
+                    </div>
+                  )}
 
                   {/* Cash Payment Details */}
                   {selectedOrder.paymentMethod === 'cash' && (

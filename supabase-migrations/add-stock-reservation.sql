@@ -37,6 +37,10 @@
 --     decides).
 --   * Orders without a reservation (created/bound before this file, Click,
 --     manual) are fulfilled as before: stock deducted by fulfill_order.
+--   * public.reconcile_payment_reservations() every 15 min (pg_cron): a held
+--     reservation older than 13 h is released only when Payme's cancel is
+--     recorded; an open transaction is marked for manual reconciliation in
+--     the Payme cabinet (payme_review_required_at) and keeps its reservation.
 --   * Refunds of performed Payme transactions are still out of scope: their
 --     stock is not returned (unchanged).
 --
@@ -64,6 +68,11 @@ BEGIN;
 
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS stock_reservation text;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS stock_reserved_at timestamptz;
+-- Set by reconcile_payment_reservations(): the Payme transaction is still open
+-- long after Payme's own 12 h timeout — an admin must check it in the Payme
+-- merchant cabinet. The reservation (stock + bonus) is kept meanwhile.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS payme_review_required_at timestamptz;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS payme_review_reason text;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_stock_reservation_check') THEN
@@ -467,6 +476,75 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------- reconcile
+-- Periodic sweep (pg_cron, every 15 min — works without new orders; see the
+-- schedule below). For each pending, unfulfilled order whose stock has been
+-- held longer than p_age (default 13 h = Payme's 12 h transaction timeout
+-- + 1 h margin), under its row lock (rows a webhook is processing right now
+-- are skipped and seen on the next run):
+--   * Payme confirmed the cancellation (payme_state < 0 recorded from Payme's
+--     CancelTransaction) -> 'rejected': the triggers return the stock and the
+--     bonus reservation, each exactly once;
+--   * the Payme transaction is still open (payme_state = 1: no cancel and no
+--     perform ever reached us) -> the status cannot be confirmed
+--     automatically (the Merchant API has no call from us to Payme), so the
+--     order is MARKED for manual reconciliation in the Payme merchant cabinet
+--     (payme_review_required_at) and the reservation is KEPT. Afterwards:
+--       - a late CancelTransaction from Payme -> rejected, stock/bonus back once;
+--       - a late PerformTransaction -> paid and fulfilled as usual (stock not
+--         deducted again);
+--       - the admin, after checking the cabinet, approves (paid) or rejects
+--         («Rad etish», not paid) — stock/bonus returned once on reject.
+-- Also runs expire_unpaid_orders() (unpaid orders without a Payme
+-- transaction that hold bonus points, 24 h), so it no longer depends on
+-- /api/orders traffic either.
+-- Returns counts: { expired, released, flagged }.
+CREATE OR REPLACE FUNCTION public.reconcile_payment_reservations(p_age interval DEFAULT interval '13 hours')
+RETURNS jsonb
+LANGUAGE plpgsql SET search_path = public, pg_temp
+AS $$
+DECLARE
+  r record;
+  v_expired integer;
+  v_released integer := 0;
+  v_flagged integer := 0;
+BEGIN
+  v_expired := public.expire_unpaid_orders();
+
+  FOR r IN
+    SELECT id, payme_state, payme_review_required_at FROM public.orders
+    WHERE stock_reservation = 'held' AND status = 'pending' AND fulfilled_at IS NULL
+      AND stock_reserved_at < now() - p_age
+    ORDER BY stock_reserved_at
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    IF COALESCE(r.payme_state, 0) < 0 THEN
+      UPDATE public.orders SET status = 'rejected' WHERE id = r.id;
+      v_released := v_released + 1;
+    ELSIF r.payme_review_required_at IS NULL THEN
+      UPDATE public.orders
+      SET payme_review_required_at = now(),
+          payme_review_reason = 'Payme tranzaksiyasi ' || round(extract(epoch FROM p_age) / 3600) || ' soatdan ortiq ochiq: bekor qilish/to''lov xabari kelmadi. '
+                                || 'Payme kabinetida tekshiring: to''langan bo''lsa — tasdiqlang, aks holda — rad eting.'
+      WHERE id = r.id;
+      v_flagged := v_flagged + 1;
+    END IF;
+  END LOOP;
+
+  RETURN jsonb_build_object('expired', v_expired, 'released', v_released, 'flagged', v_flagged);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.reconcile_payment_reservations(interval) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reconcile_payment_reservations(interval) TO service_role;
+
+-- Schedule. Supabase ships pg_cron (production: available, not installed as
+-- of 2026-11-26); jobs run in database 'postgres' as the migration's role.
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+GRANT USAGE ON SCHEMA cron TO postgres;
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'ailem-reconcile-payment-reservations';
+SELECT cron.schedule('ailem-reconcile-payment-reservations', '*/15 * * * *',
+                     'SELECT public.reconcile_payment_reservations()');
+
 -- ---------------------------------------------------------------- access
 REVOKE ALL ON FUNCTION public.payme_create_transaction(text, text, bigint, numeric) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.payme_create_transaction(text, text, bigint, numeric) TO service_role;
@@ -491,3 +569,12 @@ COMMIT;
 --          has_function_privilege('anon', 'public.admin_approve_order(text)', 'EXECUTE'),                     -- f
 --          has_function_privilege('authenticated', 'public.admin_approve_order(text)', 'EXECUTE');            -- t
 --   SELECT count(*) FROM public.orders WHERE stock_reservation IS NOT NULL;                                   -- 0 right after applying
+--   SELECT jobname, schedule, command, active FROM cron.job WHERE jobname = 'ailem-reconcile-payment-reservations'; -- 1 row, */15, active
+--   SELECT has_function_privilege('anon', 'public.reconcile_payment_reservations(interval)', 'EXECUTE'),         -- f
+--          has_function_privilege('authenticated', 'public.reconcile_payment_reservations(interval)', 'EXECUTE'); -- f
+--   -- later: SELECT status, return_message, start_time FROM cron.job_run_details
+--   --        WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = 'ailem-reconcile-payment-reservations')
+--   --        ORDER BY start_time DESC LIMIT 5;                                                                  -- succeeded
+--   -- orders waiting for manual Payme reconciliation:
+--   --   SELECT order_number, payme_transaction_id, stock_reserved_at, payme_review_required_at
+--   --   FROM public.orders WHERE payme_review_required_at IS NOT NULL AND status = 'pending';
