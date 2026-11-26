@@ -1,6 +1,6 @@
 // Server-side order pricing (src/lib/orderPricing.js) — audit 2026-11-25, finding 2.
 import { describe, expect, test } from 'vitest';
-import { priceOrder, PricingError, SELF_PICKUP_COURIER } from '../lib/orderPricing';
+import { priceOrder, PricingError, SELF_PICKUP_COURIER, UNAVAILABLE_MESSAGE } from '../lib/orderPricing';
 
 const P1 = '00000000-0000-4000-8000-000000000001';
 const P2 = '00000000-0000-4000-8000-000000000002';
@@ -129,12 +129,15 @@ describe('priceOrder', () => {
     expect(err(() => priceOrder(base({ products: [{ ...products[0], stock: null }], lines: [{ productId: P1, quantity: 1 }] }))).code).toBe('OUT_OF_STOCK');
   });
 
-  test('hidden or deleted product: PRODUCT_UNAVAILABLE, naming the product when it still exists', () => {
-    let e = err(() => priceOrder(base({ lines: [{ productId: P3, quantity: 1 }] })));
-    expect(e.code).toBe('PRODUCT_UNAVAILABLE');
-    expect(e.message).toBe("«Yashirin» hozir sotuvda yo'q. Uni savatdan olib tashlang");
-    e = err(() => priceOrder(base({ lines: [{ productId: '00000000-0000-4000-8000-0000000000ff', quantity: 1 }] })));
-    expect(e.code).toBe('PRODUCT_UNAVAILABLE');
-    expect(e.message).toContain("endi sotuvda yo'q");
+  test('hidden and deleted products get the same answer, with nothing from the product row', () => {
+    const hidden = err(() => priceOrder(base({ lines: [{ productId: P1, quantity: 1 }, { productId: P3, quantity: 1 }] })));
+    const deleted = err(() => priceOrder(base({ lines: [{ productId: P1, quantity: 1 }, { productId: '00000000-0000-4000-8000-0000000000ff', quantity: 1 }] })));
+    for (const e of [hidden, deleted]) {
+      expect(e.code).toBe('PRODUCT_UNAVAILABLE');
+      expect(e.message).toBe(UNAVAILABLE_MESSAGE);
+      expect(e.details.index).toBe(1);
+      expect(Object.keys(e.details).sort()).toEqual(['index', 'productId']);
+    }
+    expect(JSON.stringify({ m: hidden.message, d: hidden.details })).not.toMatch(/Yashirin|10000/);
   });
 });

@@ -12,6 +12,18 @@ import { generatePaymeLink } from '../../services/payme';
 // longer on sale (hidden or removed after it was added to the cart)
 const CART_FIX_CODES = new Set(['OUT_OF_STOCK', 'PRODUCT_UNAVAILABLE', 'VARIANT_UNAVAILABLE']);
 
+// The server says only WHICH line is unavailable (details.index, same order
+// as the cart lines sent). The name comes from the buyer's own cart.
+export function checkoutErrorMessage(e, cartItems) {
+  if (e?.code === 'PRODUCT_UNAVAILABLE') {
+    const name = cartItems?.[e.details?.index]?.name;
+    return name
+      ? `«${name}» endi mavjud emas. Uni savatdan olib tashlang`
+      : (e.message || "Savatdagi mahsulotlardan biri endi mavjud emas");
+  }
+  return e?.message || 'Xatolik';
+}
+
 const PaymentPage = ({ checkoutData, onNavigate }) => {
   const { cartItems } = useCart();
   const { user } = useContext(UserContext);
@@ -35,7 +47,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
         setQuote(null);
         setSessionRequired(e.code === 'SESSION_REQUIRED');
         setOutOfStock(CART_FIX_CODES.has(e.code));
-        setQuoteError(e.message || 'Xatolik');
+        setQuoteError(checkoutErrorMessage(e, cartItems));
       });
     return () => { cancelled = true; };
   }, [checkoutData, cartItems, user]);
@@ -83,7 +95,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
           // Sold out meanwhile: no order was stored; the buyer edits the cart
           setQuote(null);
           setOutOfStock(true);
-          setQuoteError(e.message);
+          setQuoteError(checkoutErrorMessage(e, cartItems));
           return;
         }
         if (e.code === 'TOTAL_MISMATCH' && e.quote) {

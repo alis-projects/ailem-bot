@@ -125,14 +125,21 @@ describe('PaymentPage', () => {
     expect(window.location.href).toBe('http://localhost/payment');
   });
 
-  test('a product hidden after it was added to the cart: reason shown, paying blocked, back to the cart', async () => {
+  test('a product hidden after it was added to the cart: named from the buyer\'s own cart, paying blocked, back to the cart', async () => {
     const onNavigate = vi.fn();
-    fetchMock.mockImplementationOnce(() => json(400, { error: 'PRODUCT_UNAVAILABLE', message: "«Choyshab» hozir sotuvda yo'q. Uni savatdan olib tashlang" }));
+    // the server names nothing: only which line it is
+    fetchMock.mockImplementationOnce(() => json(400, { error: 'PRODUCT_UNAVAILABLE', message: 'Savatdagi mahsulotlardan biri endi mavjud emas. Uni savatdan olib tashlang', details: { index: 0, productId: P1 } }));
     renderPage(user, onNavigate);
-    expect(await screen.findByRole('alert')).toHaveTextContent("sotuvda yo'q");
+    expect(await screen.findByRole('alert')).toHaveTextContent('«Choyshab» endi mavjud emas');
     expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Savatga qaytish' }));
     expect(onNavigate).toHaveBeenCalledWith('cart');
     expect(m.payme).not.toHaveBeenCalled();
+  });
+
+  test('unavailable line not in the cart any more: the neutral server message is shown', async () => {
+    fetchMock.mockImplementationOnce(() => json(400, { error: 'PRODUCT_UNAVAILABLE', message: 'Savatdagi mahsulotlardan biri endi mavjud emas. Uni savatdan olib tashlang', details: { index: 7 } }));
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Savatdagi mahsulotlardan biri endi mavjud emas');
   });
 });

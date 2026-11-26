@@ -133,6 +133,38 @@ describe.skipIf(!enabled)('local stack: hidden products are invisible to custome
     expect(await ordersFor(id)).toBe(0);
   });
 
+  test('checkout answer for a hidden product reveals nothing about it and equals the answer for a deleted one', async () => {
+    const hidden = await product('leak-check', false);
+    const deleted = '00000000-0000-4000-8000-0000000000dd';
+    const visible = await product('leak-ok', true);
+    const answers = {};
+    for (const [k, id] of [['hidden', hidden], ['deleted', deleted]]) {
+      for (const mode of ['quote', 'create']) {
+        const res = await fetch(`${env.app}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-forwarded-for': clientIp() },
+          body: JSON.stringify({ account: 'guest', delivery: selfPickup, mode, expectedTotal: 100000,
+            items: [{ productId: visible, quantity: 1 }, { productId: id, quantity: 1 }] })
+        });
+        const raw = await res.text();
+        expect(res.status).toBe(400);
+        // nothing from the hidden row: name, description, price, stock, image
+        expect(raw).not.toContain(tag);
+        expect(raw).not.toContain('secret description');
+        expect(raw).not.toMatch(/50000|shared\.svg|"stock"|"price"/);
+        answers[`${k}-${mode}`] = JSON.parse(raw);
+      }
+    }
+    for (const mode of ['quote', 'create']) {
+      const h = answers[`hidden-${mode}`];
+      const d = answers[`deleted-${mode}`];
+      expect(h).toMatchObject({ error: 'PRODUCT_UNAVAILABLE', details: { index: 1 } });
+      // identical except the id the buyer sent themselves
+      expect({ ...h, details: { ...h.details, productId: 'x' } }).toEqual({ ...d, details: { ...d.details, productId: 'x' } });
+    }
+    expect(await ordersFor(hidden)).toBe(0);
+  });
+
   test('admin sees and edits the hidden product (full record), the customer still does not', async () => {
     const id = await product('admin-edit', false);
     expect(await restRows(admin, id)).toBe(1);
@@ -176,8 +208,9 @@ describe.skipIf(!enabled)('local stack: hidden products are invisible to custome
     const c = await api({ mode: 'create', items, expectedTotal: q.json.quote.total });
     expect(c.status).toBe(400);
     expect(c.json.error).toBe('PRODUCT_UNAVAILABLE');
-    expect(c.json.message).toContain(`${tag} cart`);
-    expect(c.json.message).toContain("sotuvda yo'q");
+    expect(c.json.message).toBe("Savatdagi mahsulotlardan biri endi mavjud emas. Uni savatdan olib tashlang");
+    expect(JSON.stringify(c.json)).not.toContain(tag);
+    expect(c.json.details).toEqual({ index: 0, productId: id });
     expect(await ordersFor(id)).toBe(0);
     // made visible again: the same cart can be ordered
     await setVisible(id, true);
