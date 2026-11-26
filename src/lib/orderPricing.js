@@ -18,6 +18,11 @@
 //   bonus        at most 20% of the subtotal, at most the buyer's balance in
 //                the database; 1 point = bonus_config.pointValue UZS (default 1)
 //   total        subtotal - bonus discount + (prepaid ? delivery fee : 0)
+//   stock        the summed quantity per product/variant must not exceed the
+//                live stock (variant.stock for variant products, else
+//                product.stock) -> OUT_OF_STOCK. Advisory: Payme
+//                CreateTransaction reserves stock under row locks
+//                (supabase-migrations/add-stock-reservation.sql).
 import { calculateItemTotalWithTierGrouping, getEffectivePriceWithTierGrouping } from '../utils/volumePricing';
 
 export const SELF_PICKUP_COURIER = "O'zi olib ketish";
@@ -82,8 +87,10 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
     const unitBase = variantPrice ?? productPrice;
     const volumePricing = variant?.volume_pricing?.length > 0 ? variant.volume_pricing : (product.volume_pricing?.length > 0 ? product.volume_pricing : null);
     const weight = num(variant?.weight) > 0 ? num(variant.weight) : (num(product.weight) > 0 ? num(product.weight) : DEFAULT_WEIGHT_KG);
+    const stockSource = variant ? variant.stock : product.stock;
+    const available = Number.isFinite(num(stockSource)) ? Math.max(0, Math.floor(num(stockSource))) : 0;
     return {
-      product, variant, quantity: qty,
+      product, variant, quantity: qty, available,
       color: variant ? variant.color : null,
       size: variant ? variant.size : null,
       // shape expected by the volumePricing helpers
@@ -91,6 +98,28 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
       basePrice: productPrice, variantPrice, weight
     };
   });
+
+  // Stock: same product/variant on several lines counts together
+  const demand = new Map();
+  for (const r of resolved) {
+    const key = `${r.product.id}|${lower(r.variant?.color)}|${lower(r.variant?.size)}`;
+    const d = demand.get(key) || { r, requested: 0 };
+    d.requested += r.quantity;
+    demand.set(key, d);
+  }
+  const short = [...demand.values()].filter(d => d.requested > d.r.available).map(({ r, requested }) => ({
+    productId: r.product.id, name: r.product.name,
+    color: r.variant ? r.variant.color : null, size: r.variant ? r.variant.size : null,
+    requested, available: r.available
+  }));
+  if (short.length) {
+    const s = short[0];
+    const label = [s.name, s.color, s.size].filter(Boolean).join(', ');
+    const message = s.available > 0
+      ? `«${label}» omborda faqat ${s.available} dona qoldi. Savatdagi miqdorni kamaytiring`
+      : `«${label}» omborda qolmadi. Uni savatdan olib tashlang`;
+    throw new PricingError('OUT_OF_STOCK', message, { items: short });
+  }
 
   const priceItems = resolved.map(r => r.priceItem);
   const items = resolved.map(r => {

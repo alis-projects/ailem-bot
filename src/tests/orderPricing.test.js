@@ -7,7 +7,7 @@ const P2 = '00000000-0000-4000-8000-000000000002';
 const P3 = '00000000-0000-4000-8000-000000000003';
 
 const products = [
-  { id: P1, name: 'Choyshab', price: 100000, visible: true, variants: [], volume_pricing: null, weight: 1.2, image: 'p1.jpg' },
+  { id: P1, name: 'Choyshab', price: 100000, visible: true, variants: [], volume_pricing: null, weight: 1.2, image: 'p1.jpg', stock: 50 },
   {
     id: P2, name: 'Sochiq', price: 50000, original_price: 60000, visible: true, weight: 0.4, image: 'p2.jpg',
     volume_pricing: [{ min_qty: 3, max_qty: null, price: 45000 }],
@@ -103,5 +103,29 @@ describe('priceOrder', () => {
   test('client-supplied prices in the lines are ignored', () => {
     const q = priceOrder(base({ lines: [{ productId: P1, quantity: 1, price: 1, total: 1 }] }));
     expect(q.total).toBe(100000);
+  });
+
+  test('stock: a quantity above live stock is refused with OUT_OF_STOCK (summed per product/variant)', () => {
+    const prods = [
+      { ...products[0], stock: 1 },
+      { ...products[1], variants: [{ color: 'Oq', size: 'Katta', price: 70000, stock: 0 }, { color: 'Oq', size: 'Kichik', price: 50000, stock: 3 }] }
+    ];
+    // last unit: 1 is fine, 2 is not
+    expect(priceOrder(base({ products: prods, lines: [{ productId: P1, quantity: 1 }] })).total).toBe(100000);
+    let e = err(() => priceOrder(base({ products: prods, lines: [{ productId: P1, quantity: 2 }] })));
+    expect(e.code).toBe('OUT_OF_STOCK');
+    expect(e.message).toContain('faqat 1 dona');
+    expect(e.details.items).toEqual([{ productId: P1, name: 'Choyshab', color: null, size: null, requested: 2, available: 1 }]);
+    // two lines of the same product count together
+    expect(err(() => priceOrder(base({ products: prods, lines: [{ productId: P1, quantity: 1 }, { productId: P1, quantity: 1 }] }))).code).toBe('OUT_OF_STOCK');
+    // variant stock decides, not the sibling's; matching is case-insensitive
+    e = err(() => priceOrder(base({ products: prods, lines: [{ productId: P2, color: 'oq', size: 'katta', quantity: 1 }] })));
+    expect(e.code).toBe('OUT_OF_STOCK');
+    expect(e.message).toContain('qolmadi');
+    expect(e.details.items[0]).toMatchObject({ color: 'Oq', size: 'Katta', requested: 1, available: 0 });
+    expect(priceOrder(base({ products: prods, lines: [{ productId: P2, color: 'Oq', size: 'Kichik', quantity: 3 }] })).items[0].quantity).toBe(3);
+    expect(err(() => priceOrder(base({ products: prods, lines: [{ productId: P2, color: 'Oq', size: 'Kichik', quantity: 2 }, { productId: P2, color: 'OQ', size: 'kichik', quantity: 2 }] }))).code).toBe('OUT_OF_STOCK');
+    // missing / non-numeric stock counts as 0 (as in the database check)
+    expect(err(() => priceOrder(base({ products: [{ ...products[0], stock: null }], lines: [{ productId: P1, quantity: 1 }] }))).code).toBe('OUT_OF_STOCK');
   });
 });

@@ -101,4 +101,27 @@ describe('PaymentPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Telegram orqali kirish' }));
     expect(onNavigate).toHaveBeenCalledWith('login');
   });
+
+  test('out of stock: the reason is shown, paying is blocked and the buyer can go back to the cart', async () => {
+    const onNavigate = vi.fn();
+    fetchMock.mockImplementationOnce(() => json(409, { error: 'OUT_OF_STOCK', message: '«Choyshab» omborda qolmadi' }));
+    renderPage(user, onNavigate);
+    expect(await screen.findByRole('alert')).toHaveTextContent('omborda qolmadi');
+    expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Savatga qaytish' }));
+    expect(onNavigate).toHaveBeenCalledWith('cart');
+  });
+
+  test('sold out between quote and payment: no order, no Payme redirect, reason shown', async () => {
+    fetchMock
+      .mockImplementationOnce(() => json(200, { quote: quote(200000) }))
+      .mockImplementationOnce(() => json(409, { error: 'OUT_OF_STOCK', message: '«Choyshab» omborda faqat 1 dona qoldi' }));
+    renderPage();
+    await screen.findAllByText(/200\s?000/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /payme/i })); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('faqat 1 dona');
+    expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+    expect(m.payme).not.toHaveBeenCalled();
+    expect(window.location.href).toBe('http://localhost/payment');
+  });
 });

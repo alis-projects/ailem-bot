@@ -196,16 +196,19 @@ Phase 2: Parallel fetch of orders + users (background, ~1s later)
 ### Payment Flow (Critical — never deduct early)
 ```
 PaymentPage:
-  1. POST /api/orders: server prices the order, reserves bonus points (create_customer_order) and stores it (status: 'pending')
+  1. POST /api/orders: server prices the order, checks quantities against live stock (409 OUT_OF_STOCK),
+     reserves bonus points (create_customer_order) and stores it (status: 'pending')
   2. Store pendingPayment in localStorage
   3. Open Payme URL
+  ↓ Payme CreateTransaction (before the card is charged): stock is reserved under row locks,
+    or refused with -31052 (the last unit goes to exactly one buyer)
   ↓ user completes / cancels
 PaymentStatusPage:
   4. Poll order status every 3s (up to 6 times)
   5. On 'approved': clearCart() + redirect (bonus reservation is settled by the DB trigger, not the browser)
   6. On 'rejected': show failure, cart stays intact
 ```
-**Rule**: Never call `clearCart()` in `PaymentPage`. Bonus points are never changed by the browser: they are reserved on the server when the order is created, spent once on payment/approval and released on reject/cancel/expiry (`supabase-migrations/add-order-bonus-reservation.sql`).
+**Rule**: Never call `clearCart()` in `PaymentPage`. Bonus points are never changed by the browser: they are reserved on the server when the order is created, spent once on payment/approval and released on reject/cancel/expiry (`supabase-migrations/add-order-bonus-reservation.sql`). Stock works the same way from Payme CreateTransaction: `orders.stock_reservation` held → consumed on payment/approval (never deducted twice) or → released (returned) on reject/cancel (`supabase-migrations/add-stock-reservation.sql`).
 
 ### Hidden Products Filter
 ```javascript

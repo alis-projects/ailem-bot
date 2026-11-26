@@ -11,6 +11,8 @@
 //   POST { mode: 'create', account, ...request, expectedTotal }
 //        -> 201 { order }   when expectedTotal equals the server total
 //        -> 409 { error: 'TOTAL_MISMATCH', quote }  otherwise (nothing stored)
+//   quote/create -> 409 { error: 'OUT_OF_STOCK', message, details: { items } }
+//        when a quantity exceeds live stock (nothing stored)
 //   GET  -> { ok, serviceRole, sessionSecret }  configuration health (no values)
 //
 // WHO is buying never comes from the request body. account: 'user' requires
@@ -31,7 +33,7 @@ export const dynamic = 'force-dynamic';
 const SELF_PICKUP_ADDRESS = 'Yunusobod-19, 44 dom, Toshkent';
 const TASHKENT_DISTRICTS = ['Bektemir', 'Chilonzor', 'Mirobod', "Mirzo Ulug'bek", 'Sergeli', 'Shayxontohur', 'Uchtepa', 'Yashnobod', 'Yakkasaroy', 'Yunusobod', 'Olmazor'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const STATUS_BY_CODE = { SESSION_REQUIRED: 401 };
+const STATUS_BY_CODE = { SESSION_REQUIRED: 401, OUT_OF_STOCK: 409 };
 
 const bad = (code, message, status = 400, extra = {}) => NextResponse.json({ error: code, message, ...extra }, { status });
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -104,7 +106,7 @@ async function loadAndPrice(request, supabase, body) {
 
   const [productsRes, ratesRes, settingsRes] = await Promise.all([
     ids.length
-      ? supabase.from('products').select('id, name, price, visible, variants, volume_pricing, weight, image').in('id', ids)
+      ? supabase.from('products').select('id, name, price, visible, variants, volume_pricing, weight, image, stock').in('id', ids)
       : Promise.resolve({ data: [], error: null }),
     supabase.from('shipping_rates').select('courier, state, first_kg, additional_kg, payment_type').eq('courier', delivery.pricing.courier),
     supabase.from('app_settings').select('bonus_config').eq('id', 1).maybeSingle()

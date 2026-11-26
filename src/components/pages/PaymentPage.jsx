@@ -18,17 +18,19 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
   const [quoteError, setQuoteError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [sessionRequired, setSessionRequired] = useState(false);
+  const [outOfStock, setOutOfStock] = useState(false);
 
   useEffect(() => {
     if (!checkoutData || !user?.id || cartItems.length === 0) return;
     let cancelled = false;
     setQuoteError(null);
     checkoutAPI.quote(buildCheckoutRequest(user, cartItems, checkoutData))
-      .then(q => { if (!cancelled) { setQuote(q); setSessionRequired(false); } })
+      .then(q => { if (!cancelled) { setQuote(q); setSessionRequired(false); setOutOfStock(false); } })
       .catch(e => {
         if (cancelled) return;
         setQuote(null);
         setSessionRequired(e.code === 'SESSION_REQUIRED');
+        setOutOfStock(e.code === 'OUT_OF_STOCK');
         setQuoteError(e.message || 'Xatolik');
       });
     return () => { cancelled = true; };
@@ -70,6 +72,13 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
         if (e.code === 'SESSION_REQUIRED') {
           setQuote(null);
           setSessionRequired(true);
+          setQuoteError(e.message);
+          return;
+        }
+        if (e.code === 'OUT_OF_STOCK') {
+          // Sold out meanwhile: no order was stored; the buyer edits the cart
+          setQuote(null);
+          setOutOfStock(true);
           setQuoteError(e.message);
           return;
         }
@@ -151,6 +160,11 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
             {sessionRequired && (
               <button type="button" onClick={() => onNavigate('login')} className="block mt-2 font-semibold underline">
                 Telegram orqali kirish
+              </button>
+            )}
+            {outOfStock && (
+              <button type="button" onClick={() => onNavigate('cart')} className="block mt-2 font-semibold underline">
+                Savatga qaytish
               </button>
             )}
           </div>

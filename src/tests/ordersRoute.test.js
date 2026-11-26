@@ -82,7 +82,7 @@ beforeEach(() => {
   m.failInsert = null;
   m.db = {
     products: [
-      { id: P1, name: 'Choyshab', price: 100000, visible: true, variants: [], volume_pricing: null, weight: 1.2, image: 'p1.jpg' },
+      { id: P1, name: 'Choyshab', price: 100000, visible: true, variants: [], volume_pricing: null, weight: 1.2, image: 'p1.jpg', stock: 50 },
       { id: P2, name: 'Sochiq', price: 50000, original_price: 60000, visible: true, weight: 0.4, image: 'p2.jpg', volume_pricing: null,
         variants: [{ color: 'Oq', size: 'Katta', price: 70000, stock: 5, volume_pricing: [{ min_qty: 2, max_qty: null, price: 65000 }] }] },
       { id: P3, name: 'Yashirin', price: 10000, visible: false, variants: [] }
@@ -135,6 +135,21 @@ describe('POST /api/orders', () => {
       expect((await post({ ...request(), mode: 'create', expectedTotal })).status).toBe(409);
     }
     expect(m.db.orders).toHaveLength(0);
+  });
+
+  test('a quantity above live stock is refused (409 OUT_OF_STOCK) on quote and create, and nothing is stored', async () => {
+    m.db.products[0].stock = 1;
+    for (const mode of ['quote', 'create']) {
+      const r = await post({ ...request(), mode, expectedTotal: 200000 });
+      expect(r.status).toBe(409);
+      expect(r.json).toMatchObject({ error: 'OUT_OF_STOCK', details: { items: [{ productId: P1, requested: 2, available: 1 }] } });
+      expect(r.json.message).toContain('Choyshab');
+    }
+    expect(m.db.orders).toHaveLength(0);
+    // variant products use the variant's stock
+    const v = await post({ ...request(), items: [{ productId: P2, color: 'Oq', size: 'Katta', quantity: 6 }], mode: 'quote' });
+    expect(v.status).toBe(409);
+    expect(v.json.details.items[0]).toMatchObject({ productId: P2, color: 'Oq', size: 'Katta', requested: 6, available: 5 });
   });
 
   test('client-sent prices and totals are ignored', async () => {
