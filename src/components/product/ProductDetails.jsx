@@ -583,7 +583,7 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
                 </span>
               </div>
               <div className="space-y-1">
-                {activeVolumePricing
+                {[...activeVolumePricing]
                   .sort((a, b) => a.min_qty - b.min_qty)
                   .map((tier, idx) => (
                   <div key={idx} className="text-sm text-green-800 flex items-center gap-2 flex-wrap">

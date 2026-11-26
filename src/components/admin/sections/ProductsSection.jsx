@@ -16,6 +16,7 @@ import { productsAPI, ordersAPI, storageAPI, uzumClicksAPI } from '../../../serv
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
+import { emptyProductForm, productToForm, productImages, stockError, tiersError, normalizeTiers, formSnapshot } from '../../../utils/productForm';
 
 // Configure marked for proper line breaks
 marked.setOptions({
@@ -32,28 +33,9 @@ const ProductsSection = () => {
   const [allImages, setAllImages] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
-  const [formData, setFormData] = useState({
-    name: '',
-    description: '',
-    price: '',
-    salePrice: '',
-    imageUrl: '',
-    additionalImages: '',
-    category: '',
-    weight: '',
-    stock: '',
-    badge: '',
-    material: '',
-    colors: '',
-    sizes: '',
-    tags: '',
-    barcode: '',
-    uzumUrl: '',
-    inStock: true,
-    variants: [],
-    volume_pricing: null,
-    aPlusContent: null
-  });
+  const [formData, setFormData] = useState(emptyProductForm);
+  // Form state + images as the form was opened; differs → unsaved changes
+  const baselineRef = useRef(null);
 
   // Other local state
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -131,7 +113,7 @@ const ProductsSection = () => {
 
   // Handle tag input and suggestions
   const handleTagInput = (value) => {
-    setFormData({ ...formData, tags: value });
+    setFormData(prev => ({ ...prev, tags: value }));
     const tags = value.split(',');
     const currentTag = tags[tags.length - 1].trim().toLowerCase();
 
@@ -149,7 +131,7 @@ const ProductsSection = () => {
   const selectTagSuggestion = (tag) => {
     const tags = formData.tags.split(',').map(t => t.trim());
     tags[tags.length - 1] = tag;
-    setFormData({ ...formData, tags: tags.join(', ') + ', ' });
+    setFormData(prev => ({ ...prev, tags: tags.join(', ') + ', ' }));
     setShowTagSuggestions(false);
   };
 
@@ -178,8 +160,9 @@ const ProductsSection = () => {
     }
 
     const hasVariants = formData.variants && formData.variants.length > 0;
-    if (!hasVariants && (!formData.stock || parseInt(formData.stock) < 0)) {
-      errors.stock = 'Ombor miqdori kiritilishi shart';
+    if (!hasVariants) {
+      const stockProblem = stockError(formData.stock);
+      if (stockProblem) errors.stock = stockProblem;
     }
 
     if (allImages.length === 0) {
@@ -192,6 +175,22 @@ const ProductsSection = () => {
       if (variantKeys.length !== uniqueKeys.size) {
         errors.variants = 'Takroriy variantlar mavjud';
       }
+    }
+
+    // Bulk prices: valid ranges, no overlaps, 0 < price ≤ the regular price of
+    // the product, or of the variant when it has its own price
+    const productPrice = parseFloat(formData.salePrice || formData.price);
+    if (hasVariants) {
+      for (const v of formData.variants) {
+        const problem = tiersError(v.volume_pricing, Number(v.price) > 0 ? Number(v.price) : productPrice);
+        if (problem) {
+          errors.volumePricing = `${v.color} / ${v.size}: ${problem}`;
+          break;
+        }
+      }
+    } else {
+      const problem = tiersError(formData.volume_pricing, productPrice);
+      if (problem) errors.volumePricing = problem;
     }
 
     setFormErrors(errors);
@@ -273,15 +272,20 @@ const ProductsSection = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    await saveForm();
+  };
 
+  // Saves the open form; true when the product was saved (and the form closed)
+  const saveForm = async () => {
     // Never save an edit that did not start from the full database record
     if (editingProduct && fullRecord.status !== 'ready') {
       toast.error('Mahsulot to\'liq yuklanmadi. Saqlash mumkin emas.');
-      return;
+      return false;
     }
 
     if (!validateForm()) {
-      return;
+      toast.error('Formada xatolar bor. Belgilangan maydonlarni tekshiring.');
+      return false;
     }
 
     try {
@@ -289,7 +293,7 @@ const ProductsSection = () => {
 
       if (!addProduct || !updateProduct) {
         toast.error('Tizim tayyor emas. Iltimos, biroz kuting va qayta urinib ko\'ring.');
-        return;
+        return false;
       }
 
       const productData = {
@@ -301,7 +305,7 @@ const ProductsSection = () => {
         imageUrl: allImages[0],
         images: allImages,
         weight: formData.weight ? parseFloat(formData.weight) : null,
-        stock: parseInt(formData.stock) || 0,
+        stock: formData.variants?.length > 0 ? (parseInt(formData.stock) || 0) : parseInt(formData.stock, 10),
         badge: formData.badge || null,
         material: formData.material || null,
         colors: formData.colors ? formData.colors.split(',').map(c => c.trim()).filter(c => c) :
@@ -313,11 +317,10 @@ const ProductsSection = () => {
             ? [...new Set(formData.variants.map(v => v.size).filter(Boolean))]
             : []),
         tags: formData.tags ? formData.tags.split(',').map(t => t.trim().toLowerCase()).filter(t => t) : [],
-        variants: formData.variants || [],
+        // Bulk-price tiers are stored as numbers, sorted by min_qty
+        variants: (formData.variants || []).map(v => (v.volume_pricing ? { ...v, volume_pricing: normalizeTiers(v.volume_pricing) } : v)),
         // Clear product-level volume_pricing when variants exist (per-variant pricing takes over)
-        volume_pricing: formData.variants?.length > 0
-          ? null
-          : (formData.volume_pricing && formData.volume_pricing.length > 0 ? formData.volume_pricing : null),
+        volume_pricing: formData.variants?.length > 0 ? null : normalizeTiers(formData.volume_pricing),
         barcode: formData.barcode || null,
         uzumUrl: formData.uzumUrl || null,
         aPlusContent: formData.aPlusContent || null
@@ -371,27 +374,7 @@ const ProductsSection = () => {
       toast.success(editingProduct ? 'Mahsulot yangilandi' : 'Mahsulot qo\'shildi');
 
       closeForm();
-
-      setFormData({
-        name: '',
-        description: '',
-        price: '',
-        salePrice: '',
-        imageUrl: '',
-        additionalImages: '',
-        category: '',
-        weight: '',
-        stock: '',
-        badge: '',
-        material: '',
-        colors: '',
-        sizes: '',
-        tags: '',
-        inStock: true,
-        variants: [],
-        volume_pricing: null,
-        aPlusContent: null
-      });
+      return true;
     } catch (error) {
       console.error('❌ Failed to save product:', error);
       if (error?.code === 'reserved_variant_changed' || error?.code === 'product_stale') {
@@ -401,6 +384,7 @@ const ProductsSection = () => {
       } else {
         toast.error(`Mahsulotni saqlashda xatolik: ${error.message}`);
       }
+      return false;
     } finally {
       setSubmitting(false);
     }
@@ -416,6 +400,7 @@ const ProductsSection = () => {
     setFullRecord({ status: 'loading', error: null });
     setFormErrors({});
     setAllImages([]);
+    baselineRef.current = null;
     setShowForm(true);
     try {
       const full = await productsAPI.getById(product.id);
@@ -434,51 +419,51 @@ const ProductsSection = () => {
     editRequestRef.current++; // ignore a full-record load that is still in flight
     setShowForm(false);
     setEditingProduct(null);
+    setFormData(emptyProductForm());
     setAllImages([]);
     setFormErrors({});
     setFullRecord({ status: 'idle', error: null });
+    baselineRef.current = null;
+  };
+
+  const isFormDirty = () => showForm && baselineRef.current !== null &&
+    formSnapshot(formData, allImages) !== baselineRef.current;
+
+  // Before another card replaces the open one: unsaved changes are saved or
+  // dropped, as the admin chooses. false = stay in the open card.
+  const settleUnsavedChanges = async () => {
+    if (isFormDirty()) {
+      const choice = await confirm({
+        title: 'Saqlanmagan o\'zgarishlar',
+        message: `«${formData.name || 'Yangi mahsulot'}» kartasida saqlanmagan o'zgarishlar bor. Yangi mahsulot ochishdan oldin ularni saqlaysizmi?`,
+        type: 'warning',
+        confirmText: 'Saqlash',
+        extraText: 'O\'zgarishlarni bekor qilish',
+        cancelText: 'Tahrirga qaytish'
+      });
+      if (choice === true) return saveForm(); // on errors the card stays open with them shown
+      if (choice !== 'extra') return false;
+    }
+    return true;
+  };
+
+  // «Mahsulot qo'shish»: always a clean create form
+  const openNewForm = async () => {
+    if (!(await settleUnsavedChanges())) return;
+    closeForm();
+    const fresh = emptyProductForm();
+    setFormData(fresh);
+    baselineRef.current = formSnapshot(fresh, []);
+    setShowForm(true);
   };
 
   const fillFormFromProduct = (product) => {
     setEditingProduct(product);
-    const productImages = product.images?.length ? product.images : [product.image || product.imageUrl];
-    setAllImages(productImages.filter(url => url));
-
-    let description = product.description || '';
-    if (description && (description.includes('**') || description.includes('*') || description.includes('- ') || description.includes('\n'))) {
-      description = marked.parse(description);
-    }
-
-    setFormData({
-      name: product.name || '',
-      description: description,
-      price: product.originalPrice ? product.originalPrice.toString() : product.price.toString(),
-      salePrice: product.originalPrice ? product.price.toString() : '',
-      imageUrl: product.image || product.imageUrl,
-      additionalImages: product.images ? product.images.slice(1).join(', ') : '',
-      category: product.category,
-      weight: product.weight ? product.weight.toString() : '',
-      stock: product.stock ? product.stock.toString() : '',
-      badge: product.badge || '',
-      material: product.material || '',
-      colors: product.colors && product.colors.length > 0
-        ? product.colors.join(', ')
-        : (product.variants && product.variants.length > 0
-          ? [...new Set(product.variants.map(v => v.color).filter(Boolean))].join(', ')
-          : ''),
-      sizes: product.sizes && product.sizes.length > 0
-        ? product.sizes.join(', ')
-        : (product.variants && product.variants.length > 0
-          ? [...new Set(product.variants.map(v => v.size).filter(Boolean))].join(', ')
-          : ''),
-      tags: product.tags ? product.tags.join(', ') : '',
-      barcode: product.barcode || '',
-      uzumUrl: product.uzumUrl || '',
-      inStock: product.inStock !== false,
-      variants: product.variants || [],
-      volume_pricing: product.volume_pricing || null,
-      aPlusContent: product.aPlusContent || null
-    });
+    const images = productImages(product);
+    const form = productToForm(product);
+    setAllImages(images);
+    setFormData(form);
+    baselineRef.current = formSnapshot(form, images);
   };
 
   const handleDelete = async (productId) => {
@@ -561,50 +546,31 @@ const ProductsSection = () => {
     }
   };
 
-  const handleDuplicate = (product) => {
-    // Create a duplicate with modified name
-    const duplicatedProduct = {
-      ...product,
-      name: `${product.name} (Nusxa)`,
-      barcode: '', // Clear barcode to avoid duplicates
-    };
-
-    // Remove id and other auto-generated fields
-    delete duplicatedProduct.id;
-    delete duplicatedProduct.createdAt;
-    delete duplicatedProduct.created_at;
-    // The copy's variants are new variants: no shared permanent ids (the
-    // database assigns new ones on insert anyway)
-    duplicatedProduct.variants = (duplicatedProduct.variants || []).map(({ variant_id, ...rest }) => rest);
-
-    // Set up form with duplicated data
+  // «Nusxa»: a new product from the FULL record of the original (the catalog in
+  // the admin panel may be the lightweight one, without description/images/A+).
+  // Prices stay as they are (regular + sale), barcodes and variant ids do not:
+  // the database gives the copy's variants new ids on insert.
+  const handleDuplicate = async (product) => {
+    if (!(await settleUnsavedChanges())) return;
+    const requestId = ++editRequestRef.current;
+    let full;
+    try {
+      full = await productsAPI.getById(product.id);
+      if (!full || full.id !== product.id) throw new Error('Mahsulot topilmadi');
+    } catch (error) {
+      console.error('❌ Failed to load product for copying:', error);
+      toast.error(`Nusxa olish uchun mahsulot yuklanmadi: ${error?.message || ''}`);
+      return;
+    }
+    if (requestId !== editRequestRef.current) return;
+    const form = productToForm(full, { copy: true });
+    const images = productImages(full);
     setEditingProduct(null); // Not editing, creating new
-    const productImages = duplicatedProduct.images || [duplicatedProduct.image || duplicatedProduct.imageUrl];
-    setAllImages(productImages.filter(url => url));
-
-    setFormData({
-      name: duplicatedProduct.name,
-      description: duplicatedProduct.description || '',
-      price: duplicatedProduct.price?.toString() || '',
-      salePrice: duplicatedProduct.salePrice?.toString() || '',
-      imageUrl: duplicatedProduct.image || duplicatedProduct.imageUrl || '',
-      additionalImages: duplicatedProduct.images?.slice(1).join(',') || '',
-      category: duplicatedProduct.category || '',
-      weight: duplicatedProduct.weight?.toString() || '',
-      stock: duplicatedProduct.stock?.toString() || '',
-      badge: duplicatedProduct.badge || '',
-      material: duplicatedProduct.material || '',
-      colors: duplicatedProduct.colors?.join(', ') || '',
-      sizes: duplicatedProduct.sizes?.join(', ') || '',
-      tags: duplicatedProduct.tags?.join(', ') || '',
-      barcode: '', // Clear barcode
-      uzumUrl: duplicatedProduct.uzumUrl || '',
-      inStock: duplicatedProduct.inStock !== false,
-      variants: duplicatedProduct.variants || [],
-      volume_pricing: duplicatedProduct.volume_pricing || null,
-      aPlusContent: duplicatedProduct.aPlusContent || duplicatedProduct.a_plus_content || null
-    });
-
+    setFullRecord({ status: 'idle', error: null });
+    setFormErrors({});
+    setAllImages(images);
+    setFormData(form);
+    baselineRef.current = formSnapshot(form, images);
     setShowForm(true);
     toast.info('Mahsulot nusxalandi. Tahrirlang va saqlang.');
   };
@@ -728,12 +694,12 @@ const ProductsSection = () => {
 
   const handleVariantStockChange = (color, size, newStock) => {
     const updatedVariants = updateVariantStock(formData.variants, color, size, parseInt(newStock) || 0);
-    setFormData({ ...formData, variants: updatedVariants });
+    setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 
   const handleVariantPriceChange = (color, size, newPrice) => {
     const updatedVariants = updateVariantPrice(formData.variants, color, size, parseFloat(newPrice) || 0);
-    setFormData({ ...formData, variants: updatedVariants });
+    setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 
   const handleVariantBarcodeChange = (color, size, barcode) => {
@@ -743,7 +709,7 @@ const ProductsSection = () => {
       }
       return v;
     });
-    setFormData({ ...formData, variants: updatedVariants });
+    setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 
   const handleVariantVolumePricingChange = (color, size, newTiers) => {
@@ -753,12 +719,12 @@ const ProductsSection = () => {
       }
       return v;
     });
-    setFormData({ ...formData, variants: updatedVariants });
+    setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 
   const handleVariantImageChange = (color, size, imageUrl) => {
     const updatedVariants = updateVariantImage(formData.variants, color, size, imageUrl);
-    setFormData({ ...formData, variants: updatedVariants });
+    setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 
   const handleVariantImageUpload = async (color, size, file) => {
@@ -790,7 +756,7 @@ const ProductsSection = () => {
             CSV yuklash
           </button>
           <button
-            onClick={() => setShowForm(true)}
+            onClick={openNewForm}
             className="a-btn a-btn-primary"
           >
             <Plus className="w-5 h-5" />
@@ -851,7 +817,7 @@ const ProductsSection = () => {
                   type="text"
                   value={formData.name}
                   onChange={(e) => {
-                    setFormData({ ...formData, name: e.target.value });
+                    setFormData(prev => ({ ...prev, name: e.target.value }));
                     if (formErrors.name) setFormErrors({ ...formErrors, name: null });
                   }}
                   className="a-input"
@@ -866,7 +832,12 @@ const ProductsSection = () => {
                 <ReactQuill
                   theme="snow"
                   value={formData.description || ''}
-                  onChange={(value) => setFormData({ ...formData, description: value })}
+                  onChange={(value, _delta, source) => {
+                    // Quill also reports its own normalisation of the loaded
+                    // HTML ('api'/'silent'); only the admin's edits change the form
+                    if (source && source !== 'user') return;
+                    setFormData(prev => (prev.description === value ? prev : { ...prev, description: value }));
+                  }}
                   modules={{
                     toolbar: [
                       ['bold', 'italic', 'underline'],
@@ -886,7 +857,7 @@ const ProductsSection = () => {
                 <input
                   type="text"
                   value={formData.material}
-                  onChange={(e) => setFormData({ ...formData, material: e.target.value })}
+                  onChange={(e) => setFormData(prev => ({ ...prev, material: e.target.value }))}
                   className="a-input"
                   placeholder="Masalan: Paxta"
                 />
@@ -968,7 +939,7 @@ const ProductsSection = () => {
                 type="number"
                 value={formData.price}
                 onChange={(e) => {
-                  setFormData({ ...formData, price: e.target.value });
+                  setFormData(prev => ({ ...prev, price: e.target.value }));
                   if (formErrors.price) setFormErrors({ ...formErrors, price: null });
                 }}
                 className="a-input"
@@ -983,7 +954,7 @@ const ProductsSection = () => {
                 type="number"
                 value={formData.salePrice}
                 onChange={(e) => {
-                  setFormData({ ...formData, salePrice: e.target.value });
+                  setFormData(prev => ({ ...prev, salePrice: e.target.value }));
                   if (formErrors.salePrice) setFormErrors({ ...formErrors, salePrice: null });
                 }}
                 className="a-input"
@@ -997,7 +968,7 @@ const ProductsSection = () => {
               <select
                 value={formData.category}
                 onChange={(e) => {
-                  setFormData({ ...formData, category: e.target.value });
+                  setFormData(prev => ({ ...prev, category: e.target.value }));
                   if (formErrors.category) setFormErrors({ ...formErrors, category: null });
                 }}
                 className="a-input"
@@ -1018,7 +989,7 @@ const ProductsSection = () => {
                   type="number"
                   value={formData.stock}
                   onChange={(e) => {
-                    setFormData({ ...formData, stock: e.target.value });
+                    setFormData(prev => ({ ...prev, stock: e.target.value }));
                     if (formErrors.stock) setFormErrors({ ...formErrors, stock: null });
                   }}
                   className="a-input"
@@ -1035,7 +1006,7 @@ const ProductsSection = () => {
                   type="number"
                   step="0.01"
                   value={formData.weight}
-                  onChange={(e) => setFormData({ ...formData, weight: e.target.value })}
+                  onChange={(e) => setFormData(prev => ({ ...prev, weight: e.target.value }))}
                   className="a-input"
                   style={{ paddingRight: 48 }}
                   placeholder="Masalan: 1.5"
@@ -1048,7 +1019,7 @@ const ProductsSection = () => {
               <label className="a-muted" style={{ display: 'block', fontSize: 12.5, fontWeight: 500, marginBottom: 8 }}>Belgisi</label>
               <select
                 value={formData.badge}
-                onChange={(e) => setFormData({ ...formData, badge: e.target.value })}
+                onChange={(e) => setFormData(prev => ({ ...prev, badge: e.target.value }))}
                 className="a-input"
               >
                 <option value="">Yo'q</option>
@@ -1068,7 +1039,7 @@ const ProductsSection = () => {
               <input
                 type="text"
                 value={formData.barcode}
-                onChange={(e) => setFormData({ ...formData, barcode: e.target.value })}
+                onChange={(e) => setFormData(prev => ({ ...prev, barcode: e.target.value }))}
                 className="a-input"
                 placeholder="Masalan: 4750001234567"
               />
@@ -1080,7 +1051,7 @@ const ProductsSection = () => {
               <input
                 type="url"
                 value={formData.uzumUrl}
-                onChange={(e) => setFormData({ ...formData, uzumUrl: e.target.value })}
+                onChange={(e) => setFormData(prev => ({ ...prev, uzumUrl: e.target.value }))}
                 className="a-input"
                 placeholder="https://uzum.uz/uz/product/..."
               />
@@ -1216,7 +1187,7 @@ const ProductsSection = () => {
                                   }
                                   return v;
                                 });
-                                setFormData({ ...formData, variants: updatedVariants });
+                                setFormData(prev => ({ ...prev, variants: updatedVariants }));
                               }}
                               className="a-input text-sm"
                               style={{ width: 80, padding: '4px 8px' }}
@@ -1256,11 +1227,11 @@ const ProductsSection = () => {
                                     <div key={tIdx} className="flex items-center gap-1.5 text-xs">
                                       <input
                                         type="number"
-                                        min="1"
+                                                                                aria-label="Min miqdor"
                                         value={tier.min_qty}
                                         onChange={(e) => {
                                           const updated = [...tiers];
-                                          updated[tIdx] = { ...updated[tIdx], min_qty: parseInt(e.target.value) || 1 };
+                                          updated[tIdx] = { ...updated[tIdx], min_qty: e.target.value === '' ? '' : parseInt(e.target.value, 10) };
                                           handleVariantVolumePricingChange(variant.color, variant.size, updated);
                                         }}
                                         className="a-input text-xs"
@@ -1270,11 +1241,10 @@ const ProductsSection = () => {
                                       <span className="a-faint">-</span>
                                       <input
                                         type="number"
-                                        min={tier.min_qty}
                                         value={tier.max_qty || ''}
                                         onChange={(e) => {
                                           const updated = [...tiers];
-                                          updated[tIdx] = { ...updated[tIdx], max_qty: e.target.value ? parseInt(e.target.value) : null };
+                                          updated[tIdx] = { ...updated[tIdx], max_qty: e.target.value ? parseInt(e.target.value, 10) : null };
                                           handleVariantVolumePricingChange(variant.color, variant.size, updated);
                                         }}
                                         className="a-input text-xs"
@@ -1284,11 +1254,10 @@ const ProductsSection = () => {
                                       <span className="a-faint">=</span>
                                       <input
                                         type="number"
-                                        min="0"
                                         value={tier.price}
                                         onChange={(e) => {
                                           const updated = [...tiers];
-                                          updated[tIdx] = { ...updated[tIdx], price: parseFloat(e.target.value) || 0 };
+                                          updated[tIdx] = { ...updated[tIdx], price: e.target.value === '' ? '' : parseFloat(e.target.value) };
                                           handleVariantVolumePricingChange(variant.color, variant.size, updated);
                                         }}
                                         className="a-input text-xs"
@@ -1313,7 +1282,7 @@ const ProductsSection = () => {
                                     type="button"
                                     onClick={() => {
                                       const newTier = {
-                                        min_qty: tiers.length > 0 ? (tiers[tiers.length - 1].max_qty || tiers[tiers.length - 1].min_qty) + 1 : 2,
+                                        min_qty: tiers.length > 0 ? (Number(tiers[tiers.length - 1].max_qty || tiers[tiers.length - 1].min_qty) || 0) + 1 : 2,
                                         max_qty: null,
                                         price: variantBasePrice
                                       };
@@ -1497,15 +1466,15 @@ const ProductsSection = () => {
                     onClick={() => {
                       const newTier = {
                         min_qty: formData.volume_pricing?.length > 0
-                          ? (formData.volume_pricing[formData.volume_pricing.length - 1].max_qty || 0) + 1
+                          ? (Number(formData.volume_pricing[formData.volume_pricing.length - 1].max_qty || formData.volume_pricing[formData.volume_pricing.length - 1].min_qty) || 0) + 1
                           : 2,
                         max_qty: null,
                         price: parseFloat(formData.salePrice || formData.price) || 0
                       };
-                      setFormData({
-                        ...formData,
-                        volume_pricing: [...(formData.volume_pricing || []), newTier]
-                      });
+                      setFormData(prev => ({
+                        ...prev,
+                        volume_pricing: [...(prev.volume_pricing || []), newTier]
+                      }));
                     }}
                     className="a-btn text-white"
                     style={{ background: 'var(--ok)', borderColor: 'var(--ok)' }}
@@ -1521,9 +1490,8 @@ const ProductsSection = () => {
 
                 {formData.volume_pricing && formData.volume_pricing.length > 0 ? (
                   <div className="space-y-3">
-                    {formData.volume_pricing
-                      .sort((a, b) => a.min_qty - b.min_qty)
-                      .map((tier, index) => (
+                    {/* Rows stay in the order they were added; sorted only on save */}
+                    {formData.volume_pricing.map((tier, index) => (
                       <div key={index} className="p-3 rounded-lg flex items-center gap-3" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
                         <div className="flex-1 grid grid-cols-3 gap-3">
                           <div>
@@ -1532,12 +1500,11 @@ const ProductsSection = () => {
                             </label>
                             <input
                               type="number"
-                              min="1"
+                                                            aria-label="Min miqdor"
                               value={tier.min_qty}
                               onChange={(e) => {
-                                const updated = [...(formData.volume_pricing || [])];
-                                updated[index].min_qty = parseInt(e.target.value) || 1;
-                                setFormData({ ...formData, volume_pricing: updated });
+                                const value = e.target.value === '' ? '' : parseInt(e.target.value, 10);
+                                setFormData(prev => ({ ...prev, volume_pricing: prev.volume_pricing.map((t, i) => (i === index ? { ...t, min_qty: value } : t)) }));
                               }}
                               className="a-input text-sm"
                               style={{ padding: '6px 12px' }}
@@ -1549,12 +1516,11 @@ const ProductsSection = () => {
                             </label>
                             <input
                               type="number"
-                              min={tier.min_qty}
+                              aria-label="Max miqdor"
                               value={tier.max_qty || ''}
                               onChange={(e) => {
-                                const updated = [...(formData.volume_pricing || [])];
-                                updated[index].max_qty = e.target.value ? parseInt(e.target.value) : null;
-                                setFormData({ ...formData, volume_pricing: updated });
+                                const value = e.target.value ? parseInt(e.target.value, 10) : null;
+                                setFormData(prev => ({ ...prev, volume_pricing: prev.volume_pricing.map((t, i) => (i === index ? { ...t, max_qty: value } : t)) }));
                               }}
                               placeholder="Cheksiz"
                               className="a-input text-sm"
@@ -1567,12 +1533,11 @@ const ProductsSection = () => {
                             </label>
                             <input
                               type="number"
-                              min="0"
+                              aria-label="Har bir narxi"
                               value={tier.price}
                               onChange={(e) => {
-                                const updated = [...(formData.volume_pricing || [])];
-                                updated[index].price = parseFloat(e.target.value) || 0;
-                                setFormData({ ...formData, volume_pricing: updated });
+                                const value = e.target.value === '' ? '' : parseFloat(e.target.value);
+                                setFormData(prev => ({ ...prev, volume_pricing: prev.volume_pricing.map((t, i) => (i === index ? { ...t, price: value } : t)) }));
                               }}
                               className="a-input text-sm"
                               style={{ padding: '6px 12px' }}
@@ -1583,13 +1548,14 @@ const ProductsSection = () => {
                           type="button"
                           onClick={() => {
                             const updated = formData.volume_pricing.filter((_, i) => i !== index);
-                            setFormData({ ...formData, volume_pricing: updated.length > 0 ? updated : null });
+                            setFormData(prev => ({ ...prev, volume_pricing: updated.length > 0 ? updated : null }));
                           }}
                           className="p-2 rounded-lg transition-colors"
                           style={{ background: 'var(--danger-weak)', color: 'var(--danger)' }}
                           title="Darajani o'chirish"
+                          aria-label="Darajani o'chirish"
                         >
-                          <Edit className="w-4 h-4" />
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
                     ))}
@@ -1597,8 +1563,8 @@ const ProductsSection = () => {
                     <div className="rounded-lg p-3" style={{ background: 'var(--info-weak)', border: '1px solid var(--info)' }}>
                       <p className="text-xs font-semibold mb-2" style={{ color: 'var(--info)' }}>📊 Ko'rinish:</p>
                       <div className="text-xs space-y-1" style={{ color: 'var(--info)' }}>
-                        {formData.volume_pricing
-                          .sort((a, b) => a.min_qty - b.min_qty)
+                        {[...formData.volume_pricing]
+                          .sort((a, b) => Number(a.min_qty) - Number(b.min_qty))
                           .map((tier, idx) => (
                           <div key={idx}>
                             • {tier.min_qty}{tier.max_qty ? `-${tier.max_qty}` : '+'} dona: har biri {formatPrice(tier.price)}
@@ -1622,10 +1588,16 @@ const ProductsSection = () => {
               <div className="rounded-lg p-4" style={{ border: '1px solid var(--border)' }}>
                 <APlusEditor
                   value={formData.aPlusContent}
-                  onChange={(value) => setFormData({ ...formData, aPlusContent: value })}
+                  onChange={(value) => setFormData(prev => ({ ...prev, aPlusContent: value }))}
                 />
               </div>
             </div>
+
+            {formErrors.volumePricing && (
+              <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+                Hajmli narxlash: {formErrors.volumePricing}
+              </div>
+            )}
 
             {formErrors.save && (
               <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
@@ -1827,7 +1799,7 @@ const ProductsSection = () => {
                         <Send className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => startEdit(product)}
+                        onClick={async () => { if (await settleUnsavedChanges()) startEdit(product); }}
                         style={{ color: 'var(--accent)' }}
                         title="Tahrirlash"
                       >

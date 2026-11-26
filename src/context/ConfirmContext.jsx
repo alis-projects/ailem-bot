@@ -27,14 +27,16 @@ const buttonStyles = {
   default: 'bg-primary hover:bg-red-700 text-white'
 };
 
-const ConfirmModal = ({ config, onConfirm, onCancel }) => {
+const ConfirmModal = ({ config, onConfirm, onCancel, onExtra }) => {
   const {
     title = 'Tasdiqlash',
     message,
     confirmText = 'Tasdiqlash',
     cancelText = 'Bekor qilish',
     type = 'info',
-    showCancel = true
+    showCancel = true,
+    // Optional third answer: the promise resolves to 'extra'
+    extraText = null
   } = config;
 
   return (
@@ -66,6 +68,14 @@ const ConfirmModal = ({ config, onConfirm, onCancel }) => {
         </div>
 
         <div className="px-6 py-4 bg-gray-50 rounded-b-lg flex justify-end gap-3">
+          {extraText && (
+            <button
+              onClick={onExtra}
+              className="px-4 py-2 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+            >
+              {extraText}
+            </button>
+          )}
           {showCancel && (
             <button
               onClick={onCancel}
@@ -124,6 +134,11 @@ export const ConfirmProvider = ({ children }) => {
     setConfirmState({ isOpen: false, config: {}, resolve: null });
   }, [confirmState.resolve]);
 
+  const handleExtra = useCallback(() => {
+    confirmState.resolve?.('extra');
+    setConfirmState({ isOpen: false, config: {}, resolve: null });
+  }, [confirmState.resolve]);
+
   const handleCancel = useCallback(() => {
     confirmState.resolve?.(false);
     setConfirmState({ isOpen: false, config: {}, resolve: null });
@@ -138,6 +153,7 @@ export const ConfirmProvider = ({ children }) => {
           config={confirmState.config}
           onConfirm={handleConfirm}
           onCancel={handleCancel}
+          onExtra={handleExtra}
         />
       )}
     </ConfirmContext.Provider>
