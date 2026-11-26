@@ -25,12 +25,14 @@ vi.mock('../lib/supabase', () => {
         return { data: null, error: err };
       }
       if (q.table === 'products' && q.op === 'select' && m.gate) await m.gate(q);
+      if (q.table === 'products' && q.op === 'update' && m.failUpdate) { const e = m.failUpdate; m.failUpdate = null; return { data: null, error: e }; }
       const rows = q.table === 'products' ? [...m.db.products.values()] : (m.db[q.table] || []);
       const match = rows.filter(r => q.filters.every(([k, v]) => r[k] === v));
       if (q.op === 'update') {
         match.forEach(r => m.db.products.set(r.id, { ...r, ...JSON.parse(JSON.stringify(q.payload)) }));
         const updated = match.map(r => m.db.products.get(r.id));
-        return { data: q.single ? structuredClone(updated[0]) : structuredClone(updated), error: null };
+        if (q.updateError) return { data: null, error: q.updateError };
+        return { data: q.single ? (updated[0] ? structuredClone(updated[0]) : null) : structuredClone(updated), error: null };
       }
       if (q.single) {
         return match.length === 1
@@ -44,6 +46,7 @@ vi.mock('../lib/supabase', () => {
       update(payload) { q.op = 'update'; q.payload = payload; return chain; },
       eq(k, v) { q.filters.push([k, v]); return chain; },
       single() { q.single = true; return exec(); },
+      maybeSingle() { q.single = true; q.maybe = true; return exec(); },
       then(resolve, reject) { return exec().then(resolve, reject); }
     };
     return chain;
@@ -91,7 +94,7 @@ function renderSection() {
     users: [],
     orders: m.orders || [],
     addProduct: vi.fn(),
-    updateProduct: vi.fn((id, updates) => productsAPI.update(id, updates)),
+    updateProduct: vi.fn((id, updates, options) => productsAPI.update(id, updates, options)),
     deleteProduct: vi.fn(),
     toggleProductVisibility: vi.fn()
   };
@@ -150,6 +153,7 @@ beforeEach(() => {
   m.gate = null;
   m.confirm = vi.fn().mockResolvedValue(true);
   m.orders = [];
+  m.db.orders = [];
 });
 
 describe('Editing colours/sizes keeps variant data (audit #12)', () => {
@@ -269,9 +273,11 @@ describe('Editing colours/sizes keeps variant data (audit #12)', () => {
   });
 
   test('renaming a variant used by an unpaid order warns first; cancelling keeps everything', async () => {
-    m.orders = [
-      { id: 'ORD-1', orderNumber: 'ORD-1', status: 'pending', items: [{ productId: 'p1', color: 'Oq', size: 'Katta', quantity: 1 }] },
-      { id: 'ORD-2', orderNumber: 'ORD-2', status: 'approved', items: [{ productId: 'p1', color: 'Oq', size: 'Kichik', quantity: 1 }] }
+    // the panel's loaded list is old (says nothing); the database has the pending order
+    m.orders = [];
+    m.db.orders = [
+      { order_number: 'ORD-1', status: 'pending', items: [{ productId: 'p1', color: 'Oq', size: 'Katta', quantity: 1 }] },
+      { order_number: 'ORD-2', status: 'approved', items: [{ productId: 'p1', color: 'Oq', size: 'Kichik', quantity: 1 }] }
     ];
     m.confirm = vi.fn().mockResolvedValue(false);
     const after = await openAndSave(async () => {
@@ -284,13 +290,50 @@ describe('Editing colours/sizes keeps variant data (audit #12)', () => {
     expect(after).toEqual(VARIANTS);
   });
 
-  test('renaming with no unpaid orders on the old name does not ask', async () => {
-    m.orders = [{ id: 'ORD-3', status: 'pending', items: [{ productId: 'other', color: 'Oq', size: 'Katta', quantity: 1 }] }];
+  test('renaming with no unpaid orders on the old name (fresh from the database) does not ask', async () => {
+    // the loaded list still shows an order that the database already rejected
+    m.orders = [{ id: 'ORD-OLD', orderNumber: 'ORD-OLD', status: 'pending', items: [{ productId: 'p1', color: 'Oq', size: 'Katta', quantity: 1 }] }];
+    m.db.orders = [
+      { order_number: 'ORD-OLD', status: 'rejected', items: [{ productId: 'p1', color: 'Oq', size: 'Katta', quantity: 1 }] },
+      { order_number: 'ORD-3', status: 'pending', items: [{ productId: 'other', color: 'Oq', size: 'Katta', quantity: 1 }] }
+    ];
     const after = await openAndSave(async () => {
       typeInto(colorsInput(), 'Oq, Qora', 'Sutrang, Qora');
       await leave(colorsInput());
     });
     expect(m.confirm).not.toHaveBeenCalled();
     expect(find(after, 'Sutrang', 'Katta')).toEqual({ ...VARIANTS[0], color: 'Sutrang' });
+  });
+
+  test('server refuses renaming a variant with an active reservation: the form says why and keeps the edits', async () => {
+    m.failUpdate = Object.assign(new Error('reserved_variant_changed'), {
+      code: 'P0001', details: JSON.stringify([{ color: 'Oq', size: 'Katta', order: 'ORD-77' }])
+    });
+    const ctx = renderSection();
+    fireEvent.click(editButtonFor('Choyshab'));
+    await screen.findByText('(2 ta rasm)');
+    typeInto(colorsInput(), 'Oq, Qora', 'Sutrang, Qora');
+    await leave(colorsInput());
+    await act(async () => { fireEvent.click(saveButton()); });
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    const alert = await screen.findByText(/to'lov kutilayotgan buyurtma uchun band qilingan/);
+    expect(alert).toHaveTextContent('«Oq / Katta»');
+    expect(alert).toHaveTextContent('ORD-77');
+    expect(colorsInput()).toHaveValue('Sutrang, Qora');           // edits kept, form still open
+    expect(stored()).toEqual(VARIANTS);                          // nothing written
+  });
+
+  test('saving is refused if the product changed after the form loaded it (e.g. stock reserved by a payment)', async () => {
+    m.db.products.set('p1', { ...variantRow(), updated_at: 'T1' });
+    const ctx = renderSection();
+    fireEvent.click(editButtonFor('Choyshab'));
+    await screen.findByText('(2 ta rasm)');
+    // a payment reserves stock meanwhile -> new stock and updated_at in the DB
+    const reserved = structuredClone(VARIANTS); reserved[0].stock = 0;
+    m.db.products.set('p1', { ...m.db.products.get('p1'), variants: reserved, updated_at: 'T2' });
+    await act(async () => { fireEvent.click(saveButton()); });
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledWith('p1', expect.anything(), { expectedUpdatedAt: 'T1' }));
+    expect(await screen.findByText(/ochganingizdan keyin o'zgargan/)).toBeInTheDocument();
+    expect(stored()).toEqual(reserved);                          // the reserved stock was not overwritten
   });
 });

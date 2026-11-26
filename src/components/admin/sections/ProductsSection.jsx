@@ -12,7 +12,7 @@ import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice } from '../../../utils/helpers';
 import { updateVariantStock, updateVariantImage, updateVariantPrice, getTotalVariantStock } from '../../../utils/variants';
 import { parseAxis, axisValues, diffAxis, applyAxisChange, variantsRemovedBy, removeVariant, pruneAxisText } from '../../../utils/variantEdit';
-import { productsAPI, storageAPI, uzumClicksAPI } from '../../../services/api';
+import { productsAPI, ordersAPI, storageAPI, uzumClicksAPI } from '../../../services/api';
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
@@ -346,7 +346,8 @@ const ProductsSection = () => {
           });
         }
 
-        await updateProduct(editingProduct.id, productData);
+        // expectedUpdatedAt: refuse if the product changed since the form loaded it
+        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at });
 
         if (stockIncreased || variantsToNotify.length > 0) {
           const productWithId = { ...productData, id: editingProduct.id };
@@ -393,7 +394,13 @@ const ProductsSection = () => {
       });
     } catch (error) {
       console.error('❌ Failed to save product:', error);
-      toast.error(`Mahsulotni saqlashda xatolik: ${error.message}`);
+      if (error?.code === 'reserved_variant_changed' || error?.code === 'product_stale') {
+        // Shown in the form next to the save button; the form keeps the edits
+        setFormErrors(prev => ({ ...prev, save: error.message }));
+        toast.error(error.message);
+      } else {
+        toast.error(`Mahsulotni saqlashda xatolik: ${error.message}`);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -639,7 +646,14 @@ const ProductsSection = () => {
       // would not go back to stock if Payme cancels later. Warn first.
       const oldNames = new Set(change.renames.map(([from]) => from.trim().toLocaleLowerCase()));
       const itemAxis = (item) => (axis === 'color' ? (item.color || item.selectedColor) : (item.size || item.selectedSize));
-      const affected = (orders || []).filter(o => o.status === 'pending' && Array.isArray(o.items) && o.items.some(item =>
+      // Fresh from the database: the orders list in the admin panel may be old
+      let pending = orders || [];
+      try {
+        pending = await ordersAPI.getPendingItems();
+      } catch (error) {
+        console.error('Failed to load pending orders, using the loaded list:', error);
+      }
+      const affected = pending.filter(o => o.status === 'pending' && Array.isArray(o.items) && o.items.some(item =>
         (item.productId || item.id || item.product_id) === editingProduct.id &&
         oldNames.has(String(itemAxis(item) || '').trim().toLocaleLowerCase())));
       if (affected.length > 0) {
@@ -1608,6 +1622,12 @@ const ProductsSection = () => {
                 />
               </div>
             </div>
+
+            {formErrors.save && (
+              <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+                {formErrors.save}
+              </div>
+            )}
 
             <div className="md:col-span-2 flex gap-4">
               <button

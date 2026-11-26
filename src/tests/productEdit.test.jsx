@@ -29,12 +29,14 @@ vi.mock('../lib/supabase', () => {
         return { data: null, error: err };
       }
       if (q.table === 'products' && q.op === 'select' && m.gate) await m.gate(q);
+      if (q.table === 'products' && q.op === 'update' && m.failUpdate) { const e = m.failUpdate; m.failUpdate = null; return { data: null, error: e }; }
       const rows = q.table === 'products' ? [...m.db.products.values()] : (m.db[q.table] || []);
       const match = rows.filter(r => q.filters.every(([k, v]) => r[k] === v));
       if (q.op === 'update') {
         match.forEach(r => m.db.products.set(r.id, { ...r, ...JSON.parse(JSON.stringify(q.payload)) }));
         const updated = match.map(r => m.db.products.get(r.id));
-        return { data: q.single ? structuredClone(updated[0]) : structuredClone(updated), error: null };
+        if (q.updateError) return { data: null, error: q.updateError };
+        return { data: q.single ? (updated[0] ? structuredClone(updated[0]) : null) : structuredClone(updated), error: null };
       }
       if (q.single) {
         return match.length === 1
@@ -48,6 +50,7 @@ vi.mock('../lib/supabase', () => {
       update(payload) { q.op = 'update'; q.payload = payload; return chain; },
       eq(k, v) { q.filters.push([k, v]); return chain; },
       single() { q.single = true; return exec(); },
+      maybeSingle() { q.single = true; q.maybe = true; return exec(); },
       then(resolve, reject) { return exec().then(resolve, reject); }
     };
     return chain;
