@@ -157,9 +157,9 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
-  const updateProduct = async (productId, updates) => {
+  const updateProduct = async (productId, updates, options) => {
     try {
-      const updatedProduct = await productsAPI.update(productId, updates);
+      const updatedProduct = await productsAPI.update(productId, updates, options);
       setProducts(prev =>
         prev.map(product =>
           product.id === productId ? updatedProduct : product

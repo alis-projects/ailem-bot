@@ -11,7 +11,8 @@ import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice } from '../../../utils/helpers';
 import { updateVariantStock, updateVariantImage, updateVariantPrice, getTotalVariantStock } from '../../../utils/variants';
-import { productsAPI, storageAPI, uzumClicksAPI } from '../../../services/api';
+import { parseAxis, axisValues, diffAxis, applyAxisChange, variantsRemovedBy, removeVariant, pruneAxisText } from '../../../utils/variantEdit';
+import { productsAPI, ordersAPI, storageAPI, uzumClicksAPI } from '../../../services/api';
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
@@ -23,7 +24,7 @@ marked.setOptions({
 });
 
 const ProductsSection = () => {
-  const { products, categories, users, addProduct, updateProduct, deleteProduct, toggleProductVisibility } = useContext(AdminContext);
+  const { products, categories, users, orders, addProduct, updateProduct, deleteProduct, toggleProductVisibility } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
 
@@ -70,6 +71,9 @@ const ProductsSection = () => {
   // Full-record load for editing: idle | loading | ready | error
   const [fullRecord, setFullRecord] = useState({ status: 'idle', error: null });
   const editRequestRef = useRef(0);
+  // «Ranglar»/«O'lchamlar» text when the field got focus: the edit is applied
+  // to the variants once, when the field is left (see utils/variantEdit.js)
+  const axisFocusRef = useRef({});
 
   // Load UZUM click stats
   useEffect(() => {
@@ -183,7 +187,7 @@ const ProductsSection = () => {
     }
 
     if (hasVariants) {
-      const variantKeys = formData.variants.map(v => `${v.color}-${v.size}`);
+      const variantKeys = formData.variants.map(v => `${v.color}-${v.size}`.trim().toLocaleLowerCase());
       const uniqueKeys = new Set(variantKeys);
       if (variantKeys.length !== uniqueKeys.size) {
         errors.variants = 'Takroriy variantlar mavjud';
@@ -342,7 +346,8 @@ const ProductsSection = () => {
           });
         }
 
-        await updateProduct(editingProduct.id, productData);
+        // expectedUpdatedAt: refuse if the product changed since the form loaded it
+        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at });
 
         if (stockIncreased || variantsToNotify.length > 0) {
           const productWithId = { ...productData, id: editingProduct.id };
@@ -389,7 +394,13 @@ const ProductsSection = () => {
       });
     } catch (error) {
       console.error('❌ Failed to save product:', error);
-      toast.error(`Mahsulotni saqlashda xatolik: ${error.message}`);
+      if (error?.code === 'reserved_variant_changed' || error?.code === 'product_stale') {
+        // Shown in the form next to the save button; the form keeps the edits
+        setFormErrors(prev => ({ ...prev, save: error.message }));
+        toast.error(error.message);
+      } else {
+        toast.error(`Mahsulotni saqlashda xatolik: ${error.message}`);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -595,47 +606,120 @@ const ProductsSection = () => {
     toast.info('Mahsulot nusxalandi. Tahrirlang va saqlang.');
   };
 
-  const handleColorsOrSizesChange = (field, value) => {
-    const updatedFormData = { ...formData, [field]: value };
+  // Typing only changes the text; the variants change once, on leaving the field
+  const handleAxisTextChange = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
 
-    const colors = updatedFormData.colors ? updatedFormData.colors.split(',').map(c => c.trim()).filter(c => c) : [];
-    const sizes = updatedFormData.sizes ? updatedFormData.sizes.split(',').map(s => s.trim()).filter(s => s) : [];
+  const handleAxisFocus = (field) => {
+    axisFocusRef.current[field] = formData[field];
+  };
 
-    if (colors.length === 0 && sizes.length === 0) {
-      updatedFormData.variants = [];
-      setFormData(updatedFormData);
+  // Apply the colour/size list edit to the existing variants: rename in place
+  // (every other field kept), add new combinations, or remove the variants of
+  // removed values after a confirmation. See utils/variantEdit.js.
+  const commitAxisEdit = async (field) => {
+    const before = axisFocusRef.current[field];
+    delete axisFocusRef.current[field];
+    const current = formData[field];
+    if (before === undefined || before === current) return;
+
+    const axis = field === 'colors' ? 'color' : 'size';
+    const otherAxis = axis === 'color' ? 'size' : 'color';
+    const otherField = field === 'colors' ? 'sizes' : 'colors';
+    const revert = () => setFormData(prev => ({ ...prev, [field]: before }));
+
+    const change = diffAxis(parseAxis(before), parseAxis(current));
+    if (change.type === 'invalid') {
+      toast.error(change.error);
+      revert();
       return;
     }
+    if (change.type === 'none') return;
 
-    if (colors.length > 0 && sizes.length > 0) {
-      const newVariants = [];
+    const variants = formData.variants || [];
+    const otherValues = variants.length ? axisValues(variants, otherAxis) : parseAxis(formData[otherField]);
 
-      colors.forEach((color) => {
-        sizes.forEach((size) => {
-          const existing = formData.variants.find(v =>
-            v.color?.toLowerCase() === color.toLowerCase() &&
-            v.size?.toLowerCase() === size.toLowerCase()
-          );
-
-          newVariants.push({
-            color: color,
-            size: size,
-            stock: existing?.stock || 0,
-            price: existing?.price || null,
-            image: existing?.image || null,
-            weight: existing?.weight || null,
-            volume_pricing: existing?.volume_pricing || null,
-            sku: `${color.substring(0, 3).toUpperCase()}-${size.substring(0, 1).toUpperCase()}`
-          });
+    if (change.type === 'rename' && editingProduct) {
+      // Unpaid orders still carry the OLD name: they can no longer be paid
+      // (Payme refuses before charging), and a unit already reserved for them
+      // would not go back to stock if Payme cancels later. Warn first.
+      const oldNames = new Set(change.renames.map(([from]) => from.trim().toLocaleLowerCase()));
+      const itemAxis = (item) => (axis === 'color' ? (item.color || item.selectedColor) : (item.size || item.selectedSize));
+      // Fresh from the database: the orders list in the admin panel may be old
+      let pending = orders || [];
+      try {
+        pending = await ordersAPI.getPendingItems();
+      } catch (error) {
+        console.error('Failed to load pending orders, using the loaded list:', error);
+      }
+      const affected = pending.filter(o => o.status === 'pending' && Array.isArray(o.items) && o.items.some(item =>
+        (item.productId || item.id || item.product_id) === editingProduct.id &&
+        oldNames.has(String(itemAxis(item) || '').trim().toLocaleLowerCase())));
+      if (affected.length > 0) {
+        const ok = await confirm({
+          title: 'To\'lanmagan buyurtmalar bor',
+          message: `${affected.length} ta to'lanmagan buyurtmada eski nom ishlatilgan (${affected.slice(0, 5).map(o => o.orderNumber || o.id).join(', ')}${affected.length > 5 ? ', …' : ''}). Nomi o'zgarsa, ularni to'lab bo'lmaydi, band qilingan dona esa bekor qilinganda omborga qaytmaydi. Avval ularni yakunlash tavsiya etiladi. Baribir o'zgartirasizmi?`,
+          type: 'warning',
+          confirmText: "O'zgartirish"
         });
-      });
-
-      updatedFormData.variants = newVariants;
-    } else {
-      updatedFormData.variants = [];
+        if (!ok) {
+          revert();
+          return;
+        }
+      }
     }
 
-    setFormData(updatedFormData);
+    if (change.type === 'remove') {
+      const gone = variantsRemovedBy(variants, axis, change);
+      if (gone.length > 0) {
+        const stock = gone.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+        const ok = await confirm({
+          title: "Variantlarni o'chirish",
+          message: `${gone.length} ta variant o'chiriladi: ${gone.map(v => `${v.color} / ${v.size}`).join(', ')}. Omborda jami ${stock} dona. Boshqa variantlar o'zgarmaydi.`,
+          type: 'danger',
+          confirmText: "O'chirish"
+        });
+        if (!ok) {
+          revert();
+          return;
+        }
+      }
+    }
+
+    setFormData(prev => ({ ...prev, variants: applyAxisChange(prev.variants || [], axis, change, otherValues) }));
+    if (change.type === 'rename' && variants.length > 0) {
+      toast.info(`${change.renames.map(([from, to]) => `«${from}» → «${to}»`).join(', ')}: narx, ombor, rasm, shtrix-kod va hajm narxlari saqlandi`);
+    }
+  };
+
+  const handleAxisKeyDown = (e) => {
+    // Enter must not submit the form before the edit is applied
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.currentTarget.blur();
+    }
+  };
+
+  // Remove exactly one variant; the others stay as they are
+  const handleRemoveVariant = async (variant) => {
+    const stock = Number(variant.stock) || 0;
+    const ok = await confirm({
+      title: "Variantni o'chirish",
+      message: `«${variant.color} / ${variant.size}» varianti o'chiriladi${stock > 0 ? ` (omborda ${stock} dona)` : ''}. Boshqa variantlar o'zgarmaydi.`,
+      type: 'danger',
+      confirmText: "O'chirish"
+    });
+    if (!ok) return;
+    setFormData(prev => {
+      const variants = removeVariant(prev.variants, variant.color, variant.size);
+      return {
+        ...prev,
+        variants,
+        colors: pruneAxisText(prev.colors, variants, 'color'),
+        sizes: pruneAxisText(prev.sizes, variants, 'size')
+      };
+    });
   };
 
   const handleVariantStockChange = (color, size, newStock) => {
@@ -809,7 +893,10 @@ const ProductsSection = () => {
                 <input
                   type="text"
                   value={formData.colors}
-                  onChange={(e) => handleColorsOrSizesChange('colors', e.target.value)}
+                  onChange={(e) => handleAxisTextChange('colors', e.target.value)}
+                  onFocus={() => handleAxisFocus('colors')}
+                  onBlur={() => commitAxisEdit('colors')}
+                  onKeyDown={handleAxisKeyDown}
                   className="a-input"
                   placeholder="Oq, Qora, Ko'k (vergul bilan ajratilgan)"
                 />
@@ -820,7 +907,10 @@ const ProductsSection = () => {
                 <input
                   type="text"
                   value={formData.sizes}
-                  onChange={(e) => handleColorsOrSizesChange('sizes', e.target.value)}
+                  onChange={(e) => handleAxisTextChange('sizes', e.target.value)}
+                  onFocus={() => handleAxisFocus('sizes')}
+                  onBlur={() => commitAxisEdit('sizes')}
+                  onKeyDown={handleAxisKeyDown}
                   className="a-input"
                   placeholder="Kichik, O'rta, Katta (vergul bilan ajratilgan)"
                 />
@@ -1015,9 +1105,9 @@ const ProductsSection = () => {
                 </p>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 max-h-96 overflow-y-auto">
-                  {formData.variants.map((variant, idx) => (
+                  {formData.variants.map((variant) => (
                     <div
-                      key={idx}
+                      key={`${variant.color}|${variant.size}`}
                       className="flex items-start gap-3 p-3 rounded transition-colors"
                       style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
                     >
@@ -1053,10 +1143,22 @@ const ProductsSection = () => {
                       </div>
 
                       <div className="flex-1">
-                        <div className="text-sm font-medium mb-2">
-                          <span style={{ color: 'var(--text)' }}>{variant.color}</span>
-                          <span className="a-faint mx-1">•</span>
-                          <span style={{ color: 'var(--text)' }}>{variant.size}</span>
+                        <div className="text-sm font-medium mb-2 flex items-center justify-between gap-2">
+                          <span>
+                            <span style={{ color: 'var(--text)' }}>{variant.color}</span>
+                            <span className="a-faint mx-1">•</span>
+                            <span style={{ color: 'var(--text)' }}>{variant.size}</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveVariant(variant)}
+                            className="p-1 rounded"
+                            style={{ color: 'var(--danger)' }}
+                            title="Variantni o'chirish"
+                            aria-label={`Variantni o'chirish: ${variant.color} / ${variant.size}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                         <div className="flex flex-col gap-2">
                           <div className="flex items-center gap-2">
@@ -1520,6 +1622,12 @@ const ProductsSection = () => {
                 />
               </div>
             </div>
+
+            {formErrors.save && (
+              <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+                {formErrors.save}
+              </div>
+            )}
 
             <div className="md:col-span-2 flex gap-4">
               <button

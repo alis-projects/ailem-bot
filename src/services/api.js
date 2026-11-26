@@ -229,6 +229,21 @@ export const categoriesAPI = {
 // PRODUCTS API
 // ============================================
 
+// A product save refused by the database because a pending payment holds
+// stock of a variant that the save renames or removes
+// (supabase-migrations/protect-reserved-variants.sql).
+export function productSaveError(error) {
+  if (error?.message !== 'reserved_variant_changed') return error;
+  let held = [];
+  try { held = JSON.parse(error.details || '[]'); } catch { held = []; }
+  const variants = [...new Set(held.filter(h => h.color && h.size).map(h => `${h.color} / ${h.size}`))];
+  const orders = [...new Set(held.map(h => h.order).filter(Boolean))];
+  const message = variants.length
+    ? `Saqlanmadi: ${variants.map(v => `«${v}»`).join(', ')} varianti to'lov kutilayotgan buyurtma uchun band qilingan${orders.length ? ` (${orders.join(', ')})` : ''}. To'lov yakunlanmaguncha yoki bekor qilinmaguncha bu variantning nomini o'zgartirib yoki o'chirib bo'lmaydi. Narx, ombor va boshqa maydonlarni o'zgartirish mumkin.`
+    : "Saqlanmadi: bu mahsulot to'lov kutilayotgan buyurtma uchun band qilingan. To'lov yakunlanmaguncha yoki bekor qilinmaguncha uni o'chirib bo'lmaydi.";
+  return Object.assign(new Error(message), { code: 'reserved_variant_changed', variants, orders, cause: error });
+}
+
 export const productsAPI = {
   // Get all products (accepts optional pre-fetched reviews to avoid duplicate fetch)
   async getAll(preloadedReviews, { lightweight = true } = {}) {
@@ -374,7 +389,7 @@ export const productsAPI = {
   },
 
   // Update product
-  async update(id, updates) {
+  async update(id, updates, { expectedUpdatedAt } = {}) {
     // Transform app fields to database fields
     const dbUpdates = {};
 
@@ -411,18 +426,24 @@ export const productsAPI = {
     });
 
     try {
-      const updatePromise = supabase
+      // Optimistic concurrency: with expectedUpdatedAt the row is written only
+      // if nobody changed it since the form loaded it (payments change stock
+      // and bump updated_at), so stale stock is never written back.
+      let query = supabase
         .from('products')
         .update(dbUpdates)
-        .eq('id', id)
-        .select()
-        .single();
+        .eq('id', id);
+      if (expectedUpdatedAt) query = query.eq('updated_at', expectedUpdatedAt);
+      const updatePromise = query.select().maybeSingle();
 
       const result = await Promise.race([updatePromise, timeoutPromise]);
       clearTimeout(timeoutId);
 
-      if (result.error) throw result.error;
+      if (result.error) throw productSaveError(result.error);
       const data = result.data;
+      if (!data) {
+        throw Object.assign(new Error("Mahsulot siz ochganingizdan keyin o'zgargan (masalan, buyurtma uchun ombor band qilingan yoki boshqa admin saqlagan). Saqlanmadi: formani yopib, qayta oching."), { code: 'product_stale' });
+      }
 
       // Fetch reviews (skip if main update timed out)
       let reviews = [];
@@ -468,7 +489,7 @@ export const productsAPI = {
       .delete()
       .eq('id', id);
 
-    if (error) throw error;
+    if (error) throw productSaveError(error);
   },
 
   // Toggle product visibility
@@ -940,6 +961,17 @@ export function buildCheckoutRequest(user, cartItems, checkoutData) {
 // ============================================
 
 export const ordersAPI = {
+  // Pending orders' numbers and items, fresh from the database (admin only).
+  // Used before renaming a variant that unpaid orders may still refer to.
+  async getPendingItems() {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('order_number, status, items')
+      .eq('status', 'pending');
+    if (error) throw error;
+    return (data || []).map(o => ({ id: o.order_number, orderNumber: o.order_number, status: o.status, items: o.items }));
+  },
+
   // Helper function to map database fields to app format
   _mapOrderFromDB(order) {
     return {
