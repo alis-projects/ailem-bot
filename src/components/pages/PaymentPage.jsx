@@ -8,6 +8,10 @@ import { checkoutAPI, buildCheckoutRequest } from '../../services/api';
 
 import { generatePaymeLink } from '../../services/payme';
 
+// Errors the buyer fixes in the cart: sold out, or the product/variant is no
+// longer on sale (hidden or removed after it was added to the cart)
+const CART_FIX_CODES = new Set(['OUT_OF_STOCK', 'PRODUCT_UNAVAILABLE', 'VARIANT_UNAVAILABLE']);
+
 const PaymentPage = ({ checkoutData, onNavigate }) => {
   const { cartItems } = useCart();
   const { user } = useContext(UserContext);
@@ -30,7 +34,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
         if (cancelled) return;
         setQuote(null);
         setSessionRequired(e.code === 'SESSION_REQUIRED');
-        setOutOfStock(e.code === 'OUT_OF_STOCK');
+        setOutOfStock(CART_FIX_CODES.has(e.code));
         setQuoteError(e.message || 'Xatolik');
       });
     return () => { cancelled = true; };
@@ -75,7 +79,7 @@ const PaymentPage = ({ checkoutData, onNavigate }) => {
           setQuoteError(e.message);
           return;
         }
-        if (e.code === 'OUT_OF_STOCK') {
+        if (CART_FIX_CODES.has(e.code)) {
           // Sold out meanwhile: no order was stored; the buyer edits the cart
           setQuote(null);
           setOutOfStock(true);

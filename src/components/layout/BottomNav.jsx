@@ -3,23 +3,19 @@ import { useContext, useMemo } from 'react';
 import { UserContext } from '../../context/UserContext';
 import { useCart } from '../../hooks/useCart';
 import { useProducts } from '../../hooks/useProducts';
-import { getVisibleFavorites } from '../../utils/helpers';
+import { getVisibleCartItems, getVisibleFavorites } from '../../utils/helpers';
 
 const BottomNav = ({ currentPage, onNavigate }) => {
   const { favorites } = useContext(UserContext);
   const { cartItems } = useCart();
   const { allProducts } = useProducts();
 
-  // Count only visible cart items (hidden products excluded)
-  const cartCount = useMemo(() => {
-    if (!allProducts.length) return cartItems.reduce((c, i) => c + i.quantity, 0);
-    return cartItems
-      .filter(item => {
-        const liveProduct = allProducts.find(p => p.id === item.id);
-        return !liveProduct || liveProduct.visible !== false;
-      })
-      .reduce((count, item) => count + item.quantity, 0);
-  }, [cartItems, allProducts]);
+  // Count only cart items that are on sale — same helper as Header, so the two
+  // badges agree (hidden/removed lines are shown on the cart page instead)
+  const cartCount = useMemo(
+    () => getVisibleCartItems(cartItems, allProducts).reduce((count, item) => count + item.quantity, 0),
+    [cartItems, allProducts]
+  );
 
   // Count only favorites whose product is still visible (matches FavoritesPage)
   const favoritesCount = useMemo(

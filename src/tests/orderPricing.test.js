@@ -128,4 +128,13 @@ describe('priceOrder', () => {
     // missing / non-numeric stock counts as 0 (as in the database check)
     expect(err(() => priceOrder(base({ products: [{ ...products[0], stock: null }], lines: [{ productId: P1, quantity: 1 }] }))).code).toBe('OUT_OF_STOCK');
   });
+
+  test('hidden or deleted product: PRODUCT_UNAVAILABLE, naming the product when it still exists', () => {
+    let e = err(() => priceOrder(base({ lines: [{ productId: P3, quantity: 1 }] })));
+    expect(e.code).toBe('PRODUCT_UNAVAILABLE');
+    expect(e.message).toBe("«Yashirin» hozir sotuvda yo'q. Uni savatdan olib tashlang");
+    e = err(() => priceOrder(base({ lines: [{ productId: '00000000-0000-4000-8000-0000000000ff', quantity: 1 }] })));
+    expect(e.code).toBe('PRODUCT_UNAVAILABLE');
+    expect(e.message).toContain("endi sotuvda yo'q");
+  });
 });

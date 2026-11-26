@@ -1,4 +1,9 @@
+import * as React from 'react';
 import { createServerSupabaseClient } from './supabase-server';
+
+// React.cache exists in the React build Next.js uses for server components;
+// elsewhere (unit tests) fall back to a plain call.
+const cache = typeof React.cache === 'function' ? React.cache : (fn) => fn;
 
 // Server-side data fetching for SSR pages
 // Replicates the mapping from src/services/api.js essentialDataAPI.getAll()
@@ -59,16 +64,25 @@ export async function getEssentialData({ lightweight = true } = {}) {
   };
 }
 
-export async function getProductById(id) {
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A product a CUSTOMER may see: null when it does not exist or is hidden
+// (visible === false). The server client uses the service role, which
+// bypasses RLS, so the visibility check is explicit here. A database error
+// is thrown (the page answers 500), never reported as "not found".
+// cache(): generateMetadata and the page share one query per request.
+export const getProductById = cache(async (id) => {
+  if (typeof id !== 'string' || !UUID_RE.test(id)) return null;
   const supabase = createServerSupabaseClient();
 
   const { data, error } = await supabase
     .from('products')
     .select('*, categories(name)')
     .eq('id', id)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
+  if (!data || data.visible === false) return null;
 
   return {
     ...data,
@@ -78,7 +92,7 @@ export async function getProductById(id) {
     variants: data.variants || [],
     ...(data.a_plus_content !== undefined && { aPlusContent: data.a_plus_content }),
   };
-}
+});
 
 export async function getAllProductIds() {
   const supabase = createServerSupabaseClient();
@@ -86,7 +100,7 @@ export async function getAllProductIds() {
   const { data, error } = await supabase
     .from('products')
     .select('id')
-    .eq('visible', true);
+    .or('visible.is.null,visible.eq.true'); // NULL counts as visible, as everywhere else
 
   if (error) return [];
 

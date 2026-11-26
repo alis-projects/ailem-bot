@@ -124,4 +124,15 @@ describe('PaymentPage', () => {
     expect(m.payme).not.toHaveBeenCalled();
     expect(window.location.href).toBe('http://localhost/payment');
   });
+
+  test('a product hidden after it was added to the cart: reason shown, paying blocked, back to the cart', async () => {
+    const onNavigate = vi.fn();
+    fetchMock.mockImplementationOnce(() => json(400, { error: 'PRODUCT_UNAVAILABLE', message: "«Choyshab» hozir sotuvda yo'q. Uni savatdan olib tashlang" }));
+    renderPage(user, onNavigate);
+    expect(await screen.findByRole('alert')).toHaveTextContent("sotuvda yo'q");
+    expect(screen.getByRole('button', { name: /payme/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Savatga qaytish' }));
+    expect(onNavigate).toHaveBeenCalledWith('cart');
+    expect(m.payme).not.toHaveBeenCalled();
+  });
 });

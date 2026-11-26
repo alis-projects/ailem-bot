@@ -218,6 +218,7 @@ products.filter(p => p.visible !== false)
 // ✅ Admin views — show everything
 products  // no filter
 ```
+**Server side (authoritative, `supabase-migrations/restrict-hidden-products.sql`)**: RLS `products_select_visible_or_admin` and `get_essential_data()` return hidden products (`visible = false`) only to admins (`is_admin()`); `NULL` counts as visible. `/product/[id]` answers HTTP 404 for a missing or hidden product (checked in `middleware.js` with the anon key, because the shop layout streams inside `<Suspense>` and `notFound()` alone cannot set the status). `/api/orders` refuses hidden products (`PRODUCT_UNAVAILABLE`); the cart lists such lines as «Sotuvda yo'q» and blocks checkout. `AdminContext` reloads the catalog when an admin signs in/out, since the catalog depends on the session.
 
 ### Volume Pricing (Tier-Based Bulk Discounts)
 ```javascript

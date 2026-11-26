@@ -152,7 +152,7 @@ const ShopPage = ({ onNavigate, initialCategory, initialSearch }) => {
 
       // Extract matching tags, product names, and categories
       // Note: products are already localized by AdminContext based on current language
-      allProducts.forEach(product => {
+      allProducts.filter(product => product.visible !== false).forEach(product => {
         // Match product name (already localized by API)
         if (product.name && product.name.toLowerCase().includes(query)) {
           suggestions.add(product.name);

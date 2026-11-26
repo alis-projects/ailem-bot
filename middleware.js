@@ -1,8 +1,38 @@
 import { NextResponse } from 'next/server';
 
 const CANONICAL_HOST = 'www.ailem.uz';
+const PRODUCT_PATH = /^\/product\/([^/]+)\/?$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function middleware(request) {
+// Is this product visible to customers? Asked with the PUBLIC anon key, so
+// the database's RLS decides (policy products_select_visible_or_admin:
+// hidden products are returned only to admins). true / false, or null when
+// it cannot be determined (not configured, network error) — then the page
+// itself still refuses a hidden product, only the HTTP status stays 200.
+async function productIsPublic(id) {
+  if (!UUID_RE.test(id)) return false;
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!base || !key) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const res = await fetch(`${base}/rest/v1/products?id=eq.${id}&select=id`, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows) ? rows.length > 0 : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function middleware(request) {
   const { nextUrl } = request;
   const host = (request.headers.get('host') || '').toLowerCase();
 
@@ -26,6 +56,18 @@ export function middleware(request) {
     url.pathname = '/admin';
     url.searchParams.delete('admin');
     return NextResponse.redirect(url);
+  }
+
+  // Product page of a missing or hidden product: real HTTP 404 for customers.
+  // (The shop layout streams inside <Suspense>, so notFound() in the page can
+  // only render the "not found" UI, not change the status.) Rewriting to a
+  // path with no route makes Next answer 404 with app/not-found.jsx.
+  const productMatch = nextUrl.pathname.match(PRODUCT_PATH);
+  if (productMatch && (await productIsPublic(decodeURIComponent(productMatch[1]))) === false) {
+    const url = nextUrl.clone();
+    url.pathname = '/_product-not-found';
+    url.search = '';
+    return NextResponse.rewrite(url);
   }
 
   return NextResponse.next();

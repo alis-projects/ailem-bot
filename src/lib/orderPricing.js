@@ -72,7 +72,11 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
     }
     const product = byId.get(line?.productId);
     if (!product || product.visible === false) {
-      throw new PricingError('PRODUCT_UNAVAILABLE', 'Mahsulot mavjud emas', { index, productId: line?.productId ?? null });
+      // Hidden after it was put in the cart, or deleted: never orderable
+      const message = product?.name
+        ? `«${product.name}» hozir sotuvda yo'q. Uni savatdan olib tashlang`
+        : "Savatdagi mahsulotlardan biri endi sotuvda yo'q. Uni savatdan olib tashlang";
+      throw new PricingError('PRODUCT_UNAVAILABLE', message, { index, productId: line?.productId ?? null });
     }
     const productPrice = num(product.price);
     if (!positive(productPrice)) throw new PricingError('PRODUCT_UNAVAILABLE', 'Mahsulot narxi yo\'q', { index, productId: product.id });
