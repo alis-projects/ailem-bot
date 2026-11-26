@@ -1,3 +1,4 @@
+import { notFound } from 'next/navigation';
 import { getProductById } from '../../../../src/lib/data';
 import ProductPageClient from '../../../../src/components/pages/ProductPageClient';
 
@@ -8,8 +9,9 @@ function stripHtml(html) {
 export async function generateMetadata({ params }) {
   const product = await getProductById(params.id);
 
+  // Missing or hidden: nothing about the product goes into the metadata
   if (!product) {
-    return { title: 'Mahsulot topilmadi — Ailem' };
+    return { title: 'Mahsulot topilmadi — Ailem', robots: { index: false } };
   }
 
   const plainDesc = product.description
@@ -27,6 +29,11 @@ export async function generateMetadata({ params }) {
   };
 }
 
-export default function ProductPage({ params }) {
+// Customers get HTTP 404 for a product that does not exist or is hidden.
+// Admins edit hidden products in /admin (they load them with their own
+// session through RLS), not through this public page.
+export default async function ProductPage({ params }) {
+  const product = await getProductById(params.id);
+  if (!product) notFound();
   return <ProductPageClient productId={params.id} />;
 }

@@ -3,7 +3,7 @@ import { Trash2, Plus, Minus, ShoppingBag } from 'lucide-react';
 import { t } from "../../utils/translation-fallback";
 import { useCart } from '../../hooks/useCart';
 import { useProducts } from '../../hooks/useProducts';
-import { formatPrice, getVisibleCartItems } from '../../utils/helpers';
+import { formatPrice, getVisibleCartItems, getUnavailableCartItems } from '../../utils/helpers';
 import ProductCard from '../product/ProductCard';
 import { UserContext } from '../../context/UserContext';
 import { CartContext } from '../../context/CartContext';
@@ -55,9 +55,35 @@ const CartPage = ({ onNavigate }) => {
       });
   }, [cartItems, products]);
 
+  // Lines whose product was hidden or removed after being added: shown with
+  // a remove button; checkout stays blocked until they are gone (the server
+  // refuses them anyway).
+  const unavailableItems = useMemo(() => getUnavailableCartItems(cartItems, products), [cartItems, products]);
+  const canCheckout = unavailableItems.length === 0;
+  const unavailableBlock = unavailableItems.length > 0 && (
+    <div role="alert" className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
+      <p className="font-semibold mb-1">Sotuvda yo'q mahsulotlar</p>
+      <p className="mb-3">Bu mahsulotlar endi sotilmaydi. Buyurtma berish uchun ularni savatdan olib tashlang.</p>
+      <ul className="space-y-2">
+        {unavailableItems.map(item => (
+          <li key={item.cartItemId} className="flex justify-between items-center gap-3">
+            <span>
+              {item.name}
+              {item.selectedColor && item.selectedSize ? ` (${item.selectedColor}, ${item.selectedSize})` : ''}
+            </span>
+            <button type="button" onClick={() => removeFromCart(item.cartItemId)} className="font-semibold underline whitespace-nowrap">
+              Olib tashlash
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+
   if (visibleCartItems.length === 0) {
     return (
       <div className="pb-20 lg:pb-8">
+        {unavailableBlock && <div className="px-4 pt-4">{unavailableBlock}</div>}
         <div className="flex flex-col items-center justify-center py-16 px-4">
           <ShoppingBag className="w-24 h-24 text-gray-300 mb-4" />
           <h2 className="text-2xl font-bold text-gray-700 mb-2">{t('cart.empty')}</h2>
@@ -104,6 +130,7 @@ const CartPage = ({ onNavigate }) => {
       <div className="px-4 py-4 lg:flex lg:gap-8 lg:items-start">
         {/* Cart Items */}
         <div className="space-y-4 mb-6 lg:flex-1 lg:mb-0">
+          {unavailableBlock}
           {visibleCartItems.map((item) => (
             <div key={item.cartItemId} className="bg-white rounded-lg shadow-md p-4">
               {/* Clickable Product Area */}
@@ -291,7 +318,8 @@ const CartPage = ({ onNavigate }) => {
             </div>
             <button
               onClick={() => onNavigate('checkout')}
-              className="w-full bg-accent text-white py-4 rounded-lg font-semibold hover:bg-red-700 transition-colors"
+              disabled={!canCheckout}
+              className="w-full bg-accent text-white py-4 rounded-lg font-semibold hover:bg-red-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
             >
               {t('cart.checkout')}
             </button>
@@ -310,7 +338,8 @@ const CartPage = ({ onNavigate }) => {
           </div>
           <button
             onClick={() => onNavigate('checkout')}
-            className="w-full bg-accent text-white py-4 rounded-lg font-semibold hover:bg-red-700 transition-colors"
+            disabled={!canCheckout}
+            className="w-full bg-accent text-white py-4 rounded-lg font-semibold hover:bg-red-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
           >
             {t('cart.checkout')}
           </button>

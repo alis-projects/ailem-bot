@@ -28,6 +28,7 @@ import { calculateItemTotalWithTierGrouping, getEffectivePriceWithTierGrouping }
 export const SELF_PICKUP_COURIER = "O'zi olib ketish";
 export const MAX_LINES = 50;
 export const MAX_QUANTITY = 999;
+export const UNAVAILABLE_MESSAGE = "Savatdagi mahsulotlardan biri endi mavjud emas. Uni savatdan olib tashlang";
 const DEFAULT_WEIGHT_KG = 0.5;
 
 export class PricingError extends Error {
@@ -72,7 +73,12 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
     }
     const product = byId.get(line?.productId);
     if (!product || product.visible === false) {
-      throw new PricingError('PRODUCT_UNAVAILABLE', 'Mahsulot mavjud emas', { index, productId: line?.productId ?? null });
+      // Hidden after it was put in the cart, or deleted: never orderable.
+      // The answer is the SAME for both and carries nothing from the product
+      // row (no name, price, stock): only which of the buyer's own lines it
+      // is (index) and the id the buyer sent. The browser may name the line
+      // from what the buyer's cart already stored.
+      throw new PricingError('PRODUCT_UNAVAILABLE', UNAVAILABLE_MESSAGE, { index, productId: line?.productId ?? null });
     }
     const productPrice = num(product.price);
     if (!positive(productPrice)) throw new PricingError('PRODUCT_UNAVAILABLE', 'Mahsulot narxi yo\'q', { index, productId: product.id });

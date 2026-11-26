@@ -182,12 +182,25 @@ export const getStatusColor = (status) => {
 // Cart items that are still purchasable — product either unknown (not yet
 // resolvable) or not hidden. Keeps the header cart badge in sync with CartPage,
 // which excludes hidden products. Before products load, returns all items.
+// A cart line is on sale when its product is in the loaded catalog and not
+// hidden. The catalog customers receive no longer contains hidden products at
+// all (get_essential_data / RLS), so "missing" means hidden or deleted.
+// Until the catalog has loaded every line counts as on sale.
+const isOnSale = (item, products) => {
+  const liveProduct = products.find(p => p.id === item.id);
+  return !!liveProduct && liveProduct.visible !== false;
+};
+
 export const getVisibleCartItems = (cartItems = [], products = []) => {
   if (!products.length) return cartItems;
-  return cartItems.filter(item => {
-    const liveProduct = products.find(p => p.id === item.id);
-    return !liveProduct || liveProduct.visible !== false;
-  });
+  return cartItems.filter(item => isOnSale(item, products));
+};
+
+// Lines that can no longer be ordered (hidden or deleted after being added).
+// The server refuses them anyway (/api/orders -> PRODUCT_UNAVAILABLE).
+export const getUnavailableCartItems = (cartItems = [], products = []) => {
+  if (!products.length) return [];
+  return cartItems.filter(item => !isOnSale(item, products));
 };
 
 // Favorite product IDs whose product still exists AND is visible — matches what

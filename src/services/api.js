@@ -871,12 +871,13 @@ export const usersAPI = {
 // Customer orders are priced and stored by app/api/orders (service role).
 // The browser sends ids, quantities and the delivery choice only.
 export class CheckoutError extends Error {
-  constructor(code, message, status, quote) {
+  constructor(code, message, status, quote, details) {
     super(message || code);
     this.name = 'CheckoutError';
     this.code = code;
     this.status = status;
     this.quote = quote || null;
+    this.details = details || null;
   }
 }
 
@@ -892,7 +893,7 @@ async function postOrders(payload) {
     throw new CheckoutError('NETWORK', "Tarmoq xatosi. Qayta urinib ko'ring", 0);
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new CheckoutError(data.error || 'SERVER_ERROR', data.message, res.status, data.quote);
+  if (!res.ok) throw new CheckoutError(data.error || 'SERVER_ERROR', data.message, res.status, data.quote, data.details);
   return data;
 }
 

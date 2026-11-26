@@ -88,6 +88,8 @@ export const AdminProvider = ({ children }) => {
   // just prevents the request from ever being issued for non-admins.
   useEffect(() => {
     let cancelled = false;
+    // Whose session the loaded catalog belongs to (null = public catalog)
+    let catalogSessionUser = null;
     const isAdmin = window.location.search.includes('admin=true');
 
     loadEssentialData({ lightweight: !isAdmin });
@@ -98,6 +100,7 @@ export const AdminProvider = ({ children }) => {
       .then(({ data: { session } }) => {
         if (cancelled) return;
         if (session) {
+          catalogSessionUser = session.user?.id || null;
           loadDeferredData();
         } else {
           setAdminLoading(false);
@@ -106,14 +109,26 @@ export const AdminProvider = ({ children }) => {
       .catch(() => { if (!cancelled) setAdminLoading(false); });
 
     // React to admin auth changes: load PII data on sign-in, drop it on sign-out.
+    // The catalog depends on the session too: hidden products are returned
+    // only to admins (restrict-hidden-products.sql), so it is reloaded when the
+    // signed-in user changes — not on every token refresh/SIGNED_IN repeat.
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (cancelled) return;
       if (session && event === 'SIGNED_IN') {
+        const userId = session.user?.id || null;
+        if (userId !== catalogSessionUser) {
+          catalogSessionUser = userId;
+          loadEssentialData({ lightweight: true });
+        }
         loadDeferredData();
       } else if (event === 'SIGNED_OUT') {
         setOrders([]);
         setUsers([]);
         setAdminLoading(false);
+        if (catalogSessionUser !== null) {
+          catalogSessionUser = null;
+          loadEssentialData({ lightweight: true }); // drop hidden products from this browser
+        }
       }
     });
 
