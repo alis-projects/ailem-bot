@@ -1,3 +1,4 @@
+import { findCartVariant } from './variants';
 // Safe localStorage wrapper for Telegram Desktop compatibility
 // Telegram Desktop disables localStorage in WebView, causing DOMException
 const safeLocalStorage = (() => {
@@ -188,7 +189,15 @@ export const getStatusColor = (status) => {
 // Until the catalog has loaded every line counts as on sale.
 const isOnSale = (item, products) => {
   const liveProduct = products.find(p => p.id === item.id);
-  return !!liveProduct && liveProduct.visible !== false;
+  if (!liveProduct || liveProduct.visible === false) return false;
+  // A variant line whose variant no longer exists (removed; or, for old lines
+  // without variantId, renamed) cannot be ordered either
+  const wantsVariant = !!item.variantId || !!(item.selectedColor && item.selectedSize);
+  if (wantsVariant && Array.isArray(liveProduct.variants) && liveProduct.variants.length > 0) {
+    return !!findCartVariant(liveProduct.variants, item);
+  }
+  if (item.variantId) return false;  // an id on a product without variants
+  return true;
 };
 
 export const getVisibleCartItems = (cartItems = [], products = []) => {

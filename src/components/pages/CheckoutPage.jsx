@@ -8,7 +8,7 @@ import { PickupPointsContext } from '../../context/PickupPointsContext';
 import { ShippingRatesContext } from '../../context/ShippingRatesContext';
 import { formatPrice, bonusPointsToDollars, calculateMaxBonusUsage } from '../../utils/helpers';
 import { calculateItemTotalWithTierGrouping } from '../../utils/volumePricing';
-import { findVariant } from '../../utils/variants';
+import { findCartVariant } from '../../utils/variants';
 import { useBackButton } from '../../hooks/useBackButton';
 import CustomDropdown from '../common/CustomDropdown';
 import { usersAPI } from '../../services/api';
@@ -170,8 +170,8 @@ const CheckoutPage = ({ onNavigate }) => {
       if (!liveProduct) return item;
       let liveVolumePricing = liveProduct.volume_pricing;
       let liveWeight = liveProduct.weight;
-      if (item.selectedColor && item.selectedSize && liveProduct.variants?.length > 0) {
-        const liveVariant = findVariant(liveProduct.variants, item.selectedColor, item.selectedSize);
+      if ((item.variantId || (item.selectedColor && item.selectedSize)) && liveProduct.variants?.length > 0) {
+        const liveVariant = findCartVariant(liveProduct.variants, item);
         if (liveVariant?.volume_pricing?.length > 0) {
           liveVolumePricing = liveVariant.volume_pricing;
         }

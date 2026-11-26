@@ -487,6 +487,9 @@ const CashierMode = () => {
             basePrice: basePrice, // Store original price for reference
             quantity: item.quantity,
             variant: item.variant,
+            // permanent variant id + colour/size at sale time (order history)
+            ...(item.variant?.variant_id ? { variantId: item.variant.variant_id } : {}),
+            ...(item.variant ? { color: item.variant.color || null, size: item.variant.size || null } : {}),
             image: item.product.image
           };
         })

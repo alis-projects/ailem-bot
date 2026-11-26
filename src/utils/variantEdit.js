@@ -77,7 +77,19 @@ export function diffAxis(oldList, newList) {
 
 const skuFor = (color, size) => `${String(color).substring(0, 3).toUpperCase()}-${String(size).substring(0, 1).toUpperCase()}`;
 
+// Permanent id of a new variant (the database also fills in / fixes ids:
+// supabase-migrations/add-variant-ids.sql)
+export const newVariantId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  // RFC 4122 v4 from Math.random as a last resort (old WebViews)
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+};
+
 const emptyVariant = (color, size) => ({
+  variant_id: newVariantId(),
   color, size, stock: 0, price: null, image: null, weight: null, volume_pricing: null, sku: skuFor(color, size)
 });
 

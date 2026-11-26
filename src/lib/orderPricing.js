@@ -5,6 +5,8 @@
 // browser says about prices, fees or totals is used. The rules mirror what
 // checkout showed before (CheckoutPage / CartContext / volumePricing.js):
 //
+//   variant      by product + variant_id when the line carries variantId (no
+//                name fallback); by colour + size for old lines without it
 //   unit price   variant.price when > 0, else product.price (the sale price)
 //   volume tiers variant.volume_pricing when non-empty, else product's; items
 //                whose first tier has the same min_qty share their combined
@@ -43,6 +45,13 @@ export class PricingError extends Error {
 const lower = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 const positive = (n) => typeof n === 'number' && Number.isFinite(n) && n > 0;
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+
+export function findVariantById(product, variantId) {
+  const variants = Array.isArray(product.variants) ? product.variants : [];
+  const id = lower(variantId);
+  if (!id) return null;
+  return variants.find(v => v && lower(v.variant_id) === id) || null;
+}
 
 export function findLiveVariant(product, color, size) {
   const variants = Array.isArray(product.variants) ? product.variants : [];
@@ -84,8 +93,16 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
     if (!positive(productPrice)) throw new PricingError('PRODUCT_UNAVAILABLE', 'Mahsulot narxi yo\'q', { index, productId: product.id });
 
     const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+    // A line with variantId is resolved by product + variant_id ONLY: an
+    // unknown id, an id of another product, or an id on a product without
+    // variants is refused — never matched by name. A line without one (old
+    // carts) is resolved by colour + size as before.
     let variant = null;
-    if (hasVariants) {
+    const variantId = typeof line.variantId === 'string' && line.variantId ? line.variantId : null;
+    if (variantId) {
+      variant = hasVariants ? findVariantById(product, variantId) : null;
+      if (!variant) throw new PricingError('VARIANT_UNAVAILABLE', 'Tanlangan variant mavjud emas', { index, productId: product.id });
+    } else if (hasVariants) {
       variant = findLiveVariant(product, line.color, line.size);
       if (!variant) throw new PricingError('VARIANT_UNAVAILABLE', 'Tanlangan variant mavjud emas', { index, productId: product.id });
     }
@@ -108,13 +125,15 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
   // Stock: same product/variant on several lines counts together
   const demand = new Map();
   for (const r of resolved) {
-    const key = `${r.product.id}|${lower(r.variant?.color)}|${lower(r.variant?.size)}`;
+    const key = r.variant?.variant_id
+      ? `${r.product.id}|id:${lower(r.variant.variant_id)}`
+      : `${r.product.id}|${lower(r.variant?.color)}|${lower(r.variant?.size)}`;
     const d = demand.get(key) || { r, requested: 0 };
     d.requested += r.quantity;
     demand.set(key, d);
   }
   const short = [...demand.values()].filter(d => d.requested > d.r.available).map(({ r, requested }) => ({
-    productId: r.product.id, name: r.product.name,
+    productId: r.product.id, name: r.product.name, ...(r.variant?.variant_id ? { variantId: r.variant.variant_id } : {}),
     color: r.variant ? r.variant.color : null, size: r.variant ? r.variant.size : null,
     requested, available: r.available
   }));
@@ -138,6 +157,9 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
       basePrice: r.basePrice,
       variantPrice: r.variantPrice,
       quantity: r.quantity,
+      // The variant's permanent id (stock, reservation and Payme use it) and
+      // its colour/size AT ORDER TIME (for the order history)
+      ...(r.variant?.variant_id ? { variantId: r.variant.variant_id } : {}),
       color: r.color,
       size: r.size,
       image: r.variant?.image || r.product.image || null,

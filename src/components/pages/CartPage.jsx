@@ -12,7 +12,7 @@ import {
   calculateItemTotalWithTierGrouping,
   getTierGroupInfo
 } from '../../utils/volumePricing';
-import { getVariantStock, findVariant } from '../../utils/variants';
+import { findCartVariant } from '../../utils/variants';
 import { AdminContext } from '../../context/AdminContext';
 
 const CartPage = ({ onNavigate }) => {
@@ -42,16 +42,24 @@ const CartPage = ({ onNavigate }) => {
         const liveProduct = products.find(p => p.id === item.id);
         if (!liveProduct) return item;
 
-        // Resolve live volume_pricing: variant-level first, then product-level
+        // Resolve live volume_pricing: variant-level first, then product-level.
+        // The variant is found by its permanent id (renames do not matter);
+        // old lines without one by colour + size.
         let liveVolumePricing = liveProduct.volume_pricing;
-        if (item.selectedColor && item.selectedSize && liveProduct.variants?.length > 0) {
-          const liveVariant = findVariant(liveProduct.variants, item.selectedColor, item.selectedSize);
-          if (liveVariant?.volume_pricing?.length > 0) {
-            liveVolumePricing = liveVariant.volume_pricing;
-          }
+        const liveVariant = liveProduct.variants?.length > 0 ? findCartVariant(liveProduct.variants, item) : null;
+        if (liveVariant?.volume_pricing?.length > 0) {
+          liveVolumePricing = liveVariant.volume_pricing;
         }
 
-        return { ...item, volume_pricing: liveVolumePricing };
+        return {
+          ...item,
+          volume_pricing: liveVolumePricing,
+          liveVariant,
+          liveStock: liveVariant ? (Number(liveVariant.stock) || 0) : (Number(liveProduct.stock) || 0),
+          // show the variant's current name (it may have been renamed)
+          selectedColor: liveVariant?.color || item.selectedColor,
+          selectedSize: liveVariant?.size || item.selectedSize
+        };
       });
   }, [cartItems, products]);
 
@@ -186,19 +194,7 @@ const CartPage = ({ onNavigate }) => {
                   <button
                     onClick={() => updateQuantity(item.cartItemId, item.quantity + 1)}
                     className="w-11 h-11 rounded-lg border-2 border-gray-300 flex items-center justify-center hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={(() => {
-                      // Calculate current available stock for THIS specific variant
-                      const hasVariants = item.variants && item.variants.length > 0;
-
-                      // If product has variants and user selected a specific variant
-                      if (hasVariants && item.selectedColor && item.selectedSize) {
-                        const currentStock = getVariantStock(item.variants, item.selectedColor, item.selectedSize);
-                        return item.quantity >= currentStock;
-                      }
-
-                      // For products without variants or no selection, use regular stock
-                      return item.quantity >= (item.stock || 0);
-                    })()}
+                    disabled={item.quantity >= (item.liveStock ?? (item.stock || 0))}
                   >
                     <Plus className="w-4 h-4" />
                   </button>
@@ -214,15 +210,8 @@ const CartPage = ({ onNavigate }) => {
 
               {/* Stock limit indicator */}
               {(() => {
-                const hasVariants = item.variants && item.variants.length > 0;
-
-                // Get stock for the specific variant selected
-                let currentStock;
-                if (hasVariants && item.selectedColor && item.selectedSize) {
-                  currentStock = getVariantStock(item.variants, item.selectedColor, item.selectedSize);
-                } else {
-                  currentStock = item.stock || 0;
-                }
+                // Live stock of this line's variant (by id), else the product's
+                const currentStock = item.liveStock ?? (item.stock || 0);
 
                 if (item.quantity >= currentStock) {
                   return (

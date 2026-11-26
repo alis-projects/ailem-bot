@@ -297,7 +297,7 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
       if (Object.keys(overrides).length > 0) productForCart = { ...product, ...overrides };
     }
 
-    onAddToCart(productForCart, quantity, selectedColor, selectedSize, variantPrice);
+    onAddToCart(productForCart, quantity, selectedColor, selectedSize, variantPrice, currentVariant?.variant_id || null);
   };
 
   // Check if user is subscribed to stock notifications

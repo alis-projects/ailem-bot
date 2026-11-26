@@ -86,13 +86,17 @@ export const CartProvider = ({ children }) => {
     return () => clearTimeout(syncTimer.current);
   }, [cartItems, user?.id, cartLoaded]);
 
-  const addToCart = (product, quantity = 1, selectedColor = null, selectedSize = null, variantPrice = null) => {
+  const addToCart = (product, quantity = 1, selectedColor = null, selectedSize = null, variantPrice = null, variantId = null) => {
     setCartItems(prev => {
+      // Same line = same product and the same variant (by its permanent id
+      // when known; old lines without one by colour + size)
       const existingItemIndex = prev.findIndex(
         item =>
-          item.id === product.id &&
-          item.selectedColor === selectedColor &&
-          item.selectedSize === selectedSize
+          item.id === product.id && (
+            variantId && item.variantId
+              ? item.variantId === variantId
+              : item.selectedColor === selectedColor && item.selectedSize === selectedSize
+          )
       );
 
       if (existingItemIndex > -1) {
@@ -113,6 +117,7 @@ export const CartProvider = ({ children }) => {
           quantity,
           selectedColor,
           selectedSize,
+          variantId: variantId || null, // permanent variant id (sent to checkout)
           cartItemId: Date.now() + Math.random() // Unique ID for cart item
         }];
       }

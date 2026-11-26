@@ -85,6 +85,9 @@ function parseLines(items) {
   if (items.length > MAX_LINES) throw new PricingError('TOO_MANY_LINES', "Juda ko'p mahsulot");
   return items.map(i => ({
     productId: typeof i?.productId === 'string' && UUID_RE.test(i.productId) ? i.productId : null,
+    // A permanent variant id from the cart (validated against the product in
+    // priceOrder; anything that is not an id of THIS product is refused)
+    variantId: str(i?.variantId, 100) || null,
     color: str(i?.color, 100) || null,
     size: str(i?.size, 100) || null,
     quantity: i?.quantity
