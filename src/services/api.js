@@ -940,6 +940,9 @@ export function buildCheckoutRequest(user, cartItems, checkoutData) {
     account: user && !user.isGuest && user.telegramId ? 'user' : 'guest',
     items: (cartItems || []).map(item => ({
       productId: item.id,
+      // permanent variant id when the cart line has one; old saved carts send
+      // only colour/size and the server resolves them by name
+      ...(item.variantId ? { variantId: item.variantId } : {}),
       color: item.selectedColor || null,
       size: item.selectedSize || null,
       quantity: item.quantity

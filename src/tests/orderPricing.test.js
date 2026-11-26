@@ -140,4 +140,32 @@ describe('priceOrder', () => {
     }
     expect(JSON.stringify({ m: hidden.message, d: hidden.details })).not.toMatch(/Yashirin|10000/);
   });
+
+  test('variant ids: resolved by product + variant_id; unknown / foreign / plain-product ids refused without name fallback', () => {
+    const VA = '00000000-0000-4000-8000-00000000aaaa';
+    const VB = '00000000-0000-4000-8000-00000000bbbb';
+    const prods = [
+      { ...products[0], stock: 5 },
+      { ...products[1], variants: [
+        { variant_id: VA, color: 'Sutrang', size: 'Katta', price: 70000, stock: 5 },   // renamed from "Oq"
+        { variant_id: VB, color: 'Oq', size: 'Kichik', price: 50000, stock: 3 }
+      ] }
+    ];
+    // by id: the line's (old) names do not matter; order keeps the CURRENT names + id
+    const q = priceOrder(base({ products: prods, lines: [{ productId: P2, variantId: VA, color: 'Oq', size: 'Katta', quantity: 1 }] }));
+    expect(q.items[0]).toMatchObject({ variantId: VA, color: 'Sutrang', size: 'Katta', price: 70000 });
+    // old line without id: by name, and the stored item gets the id
+    const legacy = priceOrder(base({ products: prods, lines: [{ productId: P2, color: 'oq', size: 'kichik', quantity: 1 }] }));
+    expect(legacy.items[0]).toMatchObject({ variantId: VB, color: 'Oq', size: 'Kichik' });
+    // unknown id, even though the names match an existing variant -> refused
+    expect(err(() => priceOrder(base({ products: prods, lines: [{ productId: P2, variantId: '00000000-0000-4000-8000-00000000cccc', color: 'Oq', size: 'Kichik', quantity: 1 }] }))).code).toBe('VARIANT_UNAVAILABLE');
+    // an id on a product without variants -> refused
+    expect(err(() => priceOrder(base({ products: prods, lines: [{ productId: P1, variantId: VA, quantity: 1 }] }))).code).toBe('VARIANT_UNAVAILABLE');
+    // stock is summed per variant id
+    expect(err(() => priceOrder(base({ products: prods, lines: [
+      { productId: P2, variantId: VB, quantity: 2 }, { productId: P2, color: 'Oq', size: 'Kichik', quantity: 2 }
+    ] }))).code).toBe('OUT_OF_STOCK');
+    // plain product: no variantId key in the item
+    expect(priceOrder(base({ products: prods, lines: [{ productId: P1, quantity: 1 }] })).items[0]).not.toHaveProperty('variantId');
+  });
 });

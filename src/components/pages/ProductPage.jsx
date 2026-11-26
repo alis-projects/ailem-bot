@@ -61,8 +61,8 @@ const ProductPage = ({ productId, onNavigate }) => {
     );
   }
 
-  const handleAddToCart = (product, quantity, color, size, variantPrice = null) => {
-    addToCart(product, quantity, color, size, variantPrice);
+  const handleAddToCart = (product, quantity, color, size, variantPrice = null, variantId = null) => {
+    addToCart(product, quantity, color, size, variantPrice, variantId);
     toast.success('Mahsulot savatga qo\'shildi!');
   };
 

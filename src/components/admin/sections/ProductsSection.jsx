@@ -573,6 +573,9 @@ const ProductsSection = () => {
     delete duplicatedProduct.id;
     delete duplicatedProduct.createdAt;
     delete duplicatedProduct.created_at;
+    // The copy's variants are new variants: no shared permanent ids (the
+    // database assigns new ones on insert anyway)
+    duplicatedProduct.variants = (duplicatedProduct.variants || []).map(({ variant_id, ...rest }) => rest);
 
     // Set up form with duplicated data
     setEditingProduct(null); // Not editing, creating new
@@ -641,9 +644,9 @@ const ProductsSection = () => {
     const otherValues = variants.length ? axisValues(variants, otherAxis) : parseAxis(formData[otherField]);
 
     if (change.type === 'rename' && editingProduct) {
-      // Unpaid orders still carry the OLD name: they can no longer be paid
-      // (Payme refuses before charging), and a unit already reserved for them
-      // would not go back to stock if Payme cancels later. Warn first.
+      // Unpaid OLD orders (lines without a permanent variantId) carry the old
+      // name: they could no longer be paid. Lines with variantId follow the
+      // variant through a rename, so they are not counted. Warn first.
       const oldNames = new Set(change.renames.map(([from]) => from.trim().toLocaleLowerCase()));
       const itemAxis = (item) => (axis === 'color' ? (item.color || item.selectedColor) : (item.size || item.selectedSize));
       // Fresh from the database: the orders list in the admin panel may be old
@@ -655,6 +658,7 @@ const ProductsSection = () => {
       }
       const affected = pending.filter(o => o.status === 'pending' && Array.isArray(o.items) && o.items.some(item =>
         (item.productId || item.id || item.product_id) === editingProduct.id &&
+        !(item.variantId || item.variant_id) &&
         oldNames.has(String(itemAxis(item) || '').trim().toLocaleLowerCase())));
       if (affected.length > 0) {
         const ok = await confirm({

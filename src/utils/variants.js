@@ -330,6 +330,19 @@ export const updateVariantBarcode = (variants = [], color, size, barcode) => {
  * @param {string} barcode - Barcode to search
  * @returns {Object|null} Variant object or null
  */
+/**
+ * The live variant a cart line refers to: by its permanent variant_id when
+ * the line has one (renames do not matter), else by colour + size (old carts).
+ */
+export const findCartVariant = (variants = [], item = {}) => {
+  if (!Array.isArray(variants) || variants.length === 0 || !item) return null;
+  if (item.variantId) {
+    const id = String(item.variantId).toLowerCase();
+    return variants.find(v => v && v.variant_id && String(v.variant_id).toLowerCase() === id) || null;
+  }
+  return findVariant(variants, item.selectedColor, item.selectedSize);
+};
+
 export const findVariantByBarcode = (variants = [], barcode) => {
   if (!variants || variants.length === 0 || !barcode) {
     return null;
