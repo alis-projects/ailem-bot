@@ -13,7 +13,7 @@ import { printShippingLabel, printMultipleLabels } from '../../../utils/shipping
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
 
 const OrdersSection = ({ onImageClick }) => {
-  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData } = useContext(AdminContext);
+  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState('all');
@@ -57,6 +57,7 @@ const OrdersSection = ({ onImageClick }) => {
     if (s === 'approved' || s === 'delivered' || s === 'completed') return 'a-pill-ok';
     if (s === 'pending') return 'a-pill-warn';
     if (s === 'rejected') return 'a-pill-danger';
+    if (s === 'return_pending') return 'a-pill-warn';
     return 'a-pill-info';
   };
 
@@ -190,6 +191,29 @@ const OrdersSection = ({ onImageClick }) => {
         console.error('❌ Failed to mark as delivered:', error);
         toast.error('Holatni yangilashda xatolik. Qayta urinib ko\'ring.');
       }
+    }
+  };
+
+  // Refunded after shipping: the goods came back → stock, once
+  const handleConfirmReturn = async (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const confirmed = await confirm({
+      title: 'Qaytgan mahsulotni qabul qilish',
+      message: "Pul Payme orqali qaytarilgan. Mahsulot sizga qaytib keldimi? Tasdiqlasangiz, buyurtmadagi mahsulotlar omborga qaytariladi (bir marta).",
+      type: 'warning',
+      confirmText: 'Qabul qilindi',
+      cancelText: 'Bekor qilish'
+    });
+    if (!confirmed) return;
+    try {
+      const result = await confirmReturn(orderId);
+      toast.success(result?.result === 'already_received' ? 'Mahsulot allaqachon qabul qilingan' : 'Mahsulot omborga qaytarildi');
+    } catch (error) {
+      console.error('❌ Failed to confirm return:', error);
+      toast.error(error?.code === 'not_awaiting_return'
+        ? `Buyurtma holati: ${getStatusLabel(error.status)}. Qaytarish kutilmayapti.`
+        : "Qabul qilishda xatolik. Qayta urinib ko'ring.");
     }
   };
 
@@ -376,6 +400,8 @@ const OrdersSection = ({ onImageClick }) => {
             <option value="delivered">Yetkazilgan ({orders.filter(o => o.status === 'delivered').length})</option>
             <option value="completed">Bajarilgan ({orders.filter(o => o.status === 'completed').length})</option>
             <option value="rejected">Rad etilgan ({orders.filter(o => o.status === 'rejected').length})</option>
+            <option value="return_pending">Qaytarish kutilmoqda ({orders.filter(o => o.status === 'return_pending').length})</option>
+            <option value="refunded">Qaytarilgan ({orders.filter(o => o.status === 'refunded').length})</option>
           </select>
         </div>
       </div>
@@ -609,6 +635,15 @@ const OrdersSection = ({ onImageClick }) => {
                           </button>
                         </>
                       )}
+                      {order.status === 'return_pending' && (
+                        <button
+                          onClick={() => handleConfirmReturn(order.id)}
+                          className="font-medium whitespace-nowrap"
+                          style={{ color: 'var(--warn)' }}
+                        >
+                          Qabul qilindi
+                        </button>
+                      )}
                       {order.status === 'shipped' && (
                         <>
                           <button
@@ -807,6 +842,38 @@ const OrdersSection = ({ onImageClick }) => {
                       <span className="text-lg font-bold a-num" style={{ color: 'var(--accent-ink)' }}>{formatPrice(selectedOrder.total)}</span>
                     </div>
                   </div>
+
+                  {selectedOrder.refundedAt && (
+                    <div role="note" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)' }}>
+                      <div className="font-medium" style={{ color: 'var(--text)' }}>
+                        Pul qaytarilgan ({selectedOrder.refund?.source?.startsWith('payme:') ? 'Payme' : selectedOrder.refund?.source || '—'}), {formatDate(selectedOrder.refundedAt)}
+                      </div>
+                      <div className="a-muted">
+                        Ombor: {selectedOrder.refund?.stock === 'returned'
+                          ? 'mahsulot qaytarildi'
+                          : selectedOrder.refund?.stock === 'awaiting_return'
+                          ? "mahsulot qaytib kelishi kutilmoqda — kelganda «Qabul qilindi» ni bosing"
+                          : "o'zgartirilmadi (buyurtma tizimda yakunlanmagan edi — qo'lda tekshiring)"}
+                      </div>
+                      <div className="a-muted">
+                        Bonus: {selectedOrder.refund?.bonus_returned || 0} ball qaytarildi, {selectedOrder.refund?.bonus_revoked || 0} ball bekor qilindi
+                        {selectedOrder.refund?.amounts_estimated ? ' (joriy sozlamalar bo\'yicha hisoblangan)' : ''}
+                      </div>
+                      {selectedOrder.refund?.bonus_shortfall > 0 && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          Mijoz {selectedOrder.refund.bonus_shortfall} ball bonusni allaqachon sarflagan — ular bekor qilinmadi.
+                        </div>
+                      )}
+                      {selectedOrder.refund?.referrer_revoked > 0 && (
+                        <div className="a-muted">Taklif qilgan mijozdan {selectedOrder.refund.referrer_revoked} ball bekor qilindi</div>
+                      )}
+                      {selectedOrder.refund?.referrer_shortfall > 0 && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          Taklif qilgan mijoz {selectedOrder.refund.referrer_shortfall} ball bonusni allaqachon sarflagan.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {needsPaymeReview(selectedOrder) && (
                     <div role="alert" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)', color: 'var(--danger)' }}>

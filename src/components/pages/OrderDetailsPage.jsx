@@ -233,6 +233,11 @@ const OrderDetailsPage = ({ orderId, onNavigate }) => {
               {t('orderDetails.statusRejected')}
             </p>
           )}
+          {(order.status === 'refunded' || order.status === 'return_pending') && (
+            <p className="text-sm text-gray-700 font-medium">
+              {t('orderDetails.statusRefunded')}
+            </p>
+          )}
         </div>
         </div>{/* end right column */}
       </div>

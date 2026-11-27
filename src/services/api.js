@@ -1006,6 +1006,11 @@ export const ordersAPI = {
       deliveryFee: order.delivery_fee,
       paymeOrderId: order.payme_order_id,
       paymeTransactionId: order.payme_transaction_id,
+      paymeState: order.payme_state ?? null,
+      // Refund of a paid order (add-payme-refund.sql)
+      refundedAt: order.refunded_at || null,
+      refund: order.refund || null,
+      returnReceivedAt: order.return_received_at || null,
       // Set by reconcile_payment_reservations(): check this order in the
       // Payme merchant cabinet (stock and bonus stay reserved until then)
       paymeReviewRequiredAt: order.payme_review_required_at || null,
@@ -1203,6 +1208,14 @@ export const ordersAPI = {
   // orders that were already processed. Returns the function result object.
   async rejectAsAdmin(ref) {
     const { data, error } = await supabase.rpc('admin_reject_order', { p_ref: String(ref) });
+    if (error) throw error;
+    return data;
+  },
+
+  // The goods of a refunded, already shipped order came back: return them to
+  // stock once (admin_confirm_return, add-payme-refund.sql). Returns the result.
+  async confirmReturn(ref) {
+    const { data, error } = await supabase.rpc('admin_confirm_return', { p_ref: String(ref) });
     if (error) throw error;
     return data;
   },
