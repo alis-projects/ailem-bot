@@ -16,7 +16,7 @@ import OrdersSection from '../components/admin/sections/OrdersSection';
 import { getStatusLabel, getStatusColor } from '../utils/helpers';
 import { t } from '../utils/translation-fallback';
 
-const refundRec = (over = {}) => ({ source: 'payme:tx-1', stock: 'returned', fulfilled: true, bonus_returned: 20000, bonus_revoked: 6000, bonus_shortfall: 0, referrer_revoked: 0, referrer_shortfall: 0, amounts_estimated: false, ...over });
+const refundRec = (over = {}) => ({ source: 'payme:tx-1', stock: 'returned', fulfilled: true, bonus_returned: 20000, bonus_revoked: 6000, bonus_shortfall: 0, referrer_revoked: 0, referrer_shortfall: 0, needs_reconciliation: false, reconcile: [], ...over });
 const ord = (id, status, over = {}) => ({ id, dbId: `db-${id}`, status, createdAt: '2026-11-27T10:00:00+05:00', userName: `Mijoz ${id}`, total: 180000, items: [], paymentMethod: 'payme', ...over });
 
 function renderWith(orders, ctx = {}) {
@@ -84,12 +84,18 @@ describe('refund statuses', () => {
     expect(note).toContain('Taklif qilgan mijoz 49000 ball bonusni allaqachon sarflagan');
   });
 
-  test('order card: estimated amounts and a never-fulfilled order', () => {
+  test('order card and row: «Sverka talab qilinadi» when an amount could not be confirmed', () => {
     renderWith([
-      ord('E1', 'refunded', { refundedAt: '2026-11-27T11:00:00Z', refund: refundRec({ amounts_estimated: true }) }),
-      ord('L1', 'refunded', { refundedAt: '2026-11-27T11:00:00Z', refund: refundRec({ fulfilled: false, stock: 'not_changed', bonus_returned: 0, bonus_revoked: 0 }) })
+      ord('E1', 'refunded', { bonusPointsUsed: 5000, refundedAt: '2026-11-27T11:00:00Z', refund: refundRec({ bonus_returned: 0, bonus_revoked: 0, needs_reconciliation: true, reconcile: ['bonus_earned_unrecorded', 'bonus_used_unconfirmed'] }) }),
+      ord('OK1', 'refunded', { refundedAt: '2026-11-27T11:00:00Z', refund: refundRec() })
     ]);
+    expect(within(rowOf('E1')).getByText('Sverka talab qilinadi')).toBeTruthy();
+    expect(within(rowOf('OK1')).queryByText('Sverka talab qilinadi')).toBeNull();
     fireEvent.click(within(rowOf('E1')).getByText("Ko'rish"));
-    expect(screen.getByRole('note').textContent).toContain("joriy sozlamalar bo'yicha hisoblangan");
+    const note = screen.getByRole('note').textContent;
+    expect(note).toContain('Sverka talab qilinadi');
+    expect(note).toContain("Xarid uchun berilgan bonus miqdori operatsiyalar tarixida yo'q");
+    expect(note).toContain('Buyurtmada ishlatilgan 5000 ball tarixda tasdiqlanmagan');
+    expect(note).not.toContain('joriy sozlamalar');
   });
 });

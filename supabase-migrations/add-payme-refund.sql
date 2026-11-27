@@ -22,8 +22,11 @@
 --   * an unpaid transaction (state 1) is unchanged: 'rejected', -1
 -- fulfill_order now records what it credited (bonus_earned,
 -- referral_commission, referrer_user_id) so a refund revokes exactly that;
--- for orders fulfilled before this file the amounts are recomputed with the
--- current bonus settings and marked refund.amounts_estimated = true.
+-- Bonuses are changed only by amounts confirmed by that record (or, for the
+-- spent bonus, by the checkout reservation). If an amount cannot be confirmed
+-- (orders fulfilled before this file, legacy bonus use without a reservation),
+-- that balance is left as it is and refund.needs_reconciliation = true with the
+-- reasons in refund.reconcile — shown to the admin as «Sverka talab qilinadi».
 -- 'refunded' / 'return_pending' can only be entered or left through these
 -- functions (trigger orders_refund_guard), not by a plain status update.
 --
@@ -146,14 +149,12 @@ AS $$
 DECLARE
   o public.orders%ROWTYPE;
   v_items jsonb;
-  v_cfg jsonb;
-  v_base numeric;
   v_buyer uuid;
   v_returned integer := 0;
   v_earned integer := 0;
   v_comm integer := 0;
   v_referrer uuid;
-  v_estimated boolean := false;
+  v_reconcile text[] := ARRAY[]::text[];
   v_balance integer;
   v_short integer := 0;
   v_ref_short integer := 0;
@@ -172,7 +173,9 @@ BEGIN
     -- Paid before stock/bonus bookkeeping existed (or never fulfilled): nothing
     -- is known to undo; the admin checks it by hand.
     v_rec := jsonb_build_object('source', p_source, 'at', now(), 'fulfilled', false,
-      'stock', 'not_changed', 'bonus_returned', 0, 'bonus_revoked', 0, 'note', 'order was never fulfilled: check stock and bonuses by hand');
+      'stock', 'not_changed', 'bonus_returned', 0, 'bonus_revoked', 0, 'bonus_shortfall', 0,
+      'referrer_revoked', 0, 'referrer_shortfall', 0,
+      'needs_reconciliation', true, 'reconcile', jsonb_build_array('not_fulfilled'));
     UPDATE public.orders SET refunded_at = now(), refund = v_rec WHERE id = o.id;
     RETURN v_rec;
   END IF;
@@ -186,24 +189,19 @@ BEGIN
   -- Bonuses
   IF o.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
     v_buyer := o.user_id::uuid;
-    -- spent on this order (reserved at checkout, spent on payment)
+    -- spent on this order: only what the checkout reservation confirms
     IF o.bonus_reservation = 'spent' THEN
       v_returned := COALESCE(o.bonus_reserved, 0);
+    ELSIF COALESCE(o.bonus_points_used, 0) > 0 AND o.bonus_reservation IS DISTINCT FROM 'released' THEN
+      v_reconcile := array_append(v_reconcile, 'bonus_used_unconfirmed');   -- legacy deduction, not recorded
     END IF;
-    -- credited for this order
+    -- credited for this order: only what fulfill_order recorded
     IF o.bonus_earned IS NOT NULL THEN
       v_earned := o.bonus_earned;
       v_comm := COALESCE(o.referral_commission, 0);
       v_referrer := o.referrer_user_id;
     ELSE
-      -- fulfilled before amounts were recorded: recompute (payme/admin use the
-      -- subtotal, click the total) with the CURRENT settings
-      v_estimated := true;
-      SELECT bonus_config INTO v_cfg FROM public.app_settings WHERE id = 1;
-      v_base := CASE WHEN COALESCE(o.fulfilled_by, '') LIKE 'click:%' THEN COALESCE(o.total, 0)
-                     ELSE COALESCE(NULLIF(o.subtotal, 0), o.total, 0) END;
-      v_earned := payment_internal.js_round(v_base * COALESCE(NULLIF(payment_internal.json_num(v_cfg -> 'purchaseBonus'), 0), 1) / 100);
-      v_comm := 0;   -- referrer unknown for old orders: not revoked
+      v_reconcile := array_append(v_reconcile, 'bonus_earned_unrecorded');  -- fulfilled before this file
     END IF;
 
     PERFORM 1 FROM public.users WHERE id IN (v_buyer, v_referrer) ORDER BY id FOR UPDATE;
@@ -239,7 +237,7 @@ BEGIN
     'stock', CASE WHEN p_restock THEN 'returned' ELSE 'awaiting_return' END,
     'bonus_returned', v_returned, 'bonus_revoked', v_earned - v_short, 'bonus_shortfall', v_short,
     'referrer', v_referrer, 'referrer_revoked', v_comm - v_ref_short, 'referrer_shortfall', v_ref_short,
-    'amounts_estimated', v_estimated);
+    'needs_reconciliation', cardinality(v_reconcile) > 0, 'reconcile', to_jsonb(v_reconcile));
   UPDATE public.orders SET refunded_at = now(), refund = v_rec WHERE id = o.id;
   RETURN v_rec;
 END;

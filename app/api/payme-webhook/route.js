@@ -513,8 +513,11 @@ async function notifyAdminRefund(transactionId, data) {
     `Buyurtma: <b>#${order.order_number}</b>, ${Number(order.total).toLocaleString()} UZS`,
     order.status === 'return_pending'
       ? `📦 Mahsulot jo'natilgan: qaytib kelganda admin panelda «Qabul qilindi» ni bosing (ombor shundan keyin to'ldiriladi).`
-      : `📦 Mahsulot omborga qaytarildi.`,
+      : r.stock === 'returned'
+      ? `📦 Mahsulot omborga qaytarildi.`
+      : `📦 Ombor o'zgartirilmadi.`,
     `🎁 Bonus: ${r.bonus_returned || 0} qaytarildi, ${r.bonus_revoked || 0} bekor qilindi${r.bonus_shortfall ? `, ${r.bonus_shortfall} yetishmadi (allaqachon sarflangan)` : ''}.`
   ];
+  if (r.needs_reconciliation) lines.push(`⚠️ <b>Sverka talab qilinadi</b>: bonus miqdori tarixda tasdiqlanmagan, balans o'zgartirilmadi.`);
   await sendTelegramNotification(ADMIN_CHAT_ID, lines.join('\n'));
 }

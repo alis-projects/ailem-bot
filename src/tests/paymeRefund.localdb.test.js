@@ -102,7 +102,7 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     expect(after.buyer).toBe(earned + 20000 - earned);        // spent bonus back, earned revoked
     expect(after.referrer).toBe(0);
     expect(after.order).toMatchObject({ status: 'refunded', payme_state: -2, payme_cancel_reason: 5 });
-    expect(after.order.refund).toMatchObject({ stock: 'returned', bonus_returned: 20000, bonus_revoked: earned, bonus_shortfall: 0, referrer_revoked: comm, amounts_estimated: false });
+    expect(after.order.refund).toMatchObject({ stock: 'returned', bonus_returned: 20000, bonus_revoked: earned, bonus_shortfall: 0, referrer_revoked: comm, needs_reconciliation: false, reconcile: [] });
     expect((await payme('CheckTransaction', { id: o.tx })).result).toMatchObject({ state: -2, reason: 5 });
 
     // repeated notification: same answer, nothing changes
@@ -158,7 +158,8 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     const r = await row(o.n);
     expect(await bonus(buyerId)).toBe(0);
     expect(await bonus(referrerId)).toBe(0);
-    expect(r.refund).toMatchObject({ bonus_revoked: 4000, bonus_shortfall: earned - 4000, referrer_revoked: 1000, referrer_shortfall: comm - 1000 });
+    expect(r.refund).toMatchObject({ bonus_revoked: 4000, bonus_shortfall: earned - 4000, referrer_revoked: 1000, referrer_shortfall: comm - 1000, needs_reconciliation: false });
+    expect(r).toMatchObject({ status: 'refunded', payme_state: -2 });
     console.log('RESULT', JSON.stringify({ R3: { earned, buyer_balance_before_refund: 4000, refund: r.refund } }));
   });
 
@@ -189,15 +190,43 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     expect(rej.data.result).toBe('already_processed');
   });
 
-  test('R6 fulfilled before amounts were recorded: revoked by the current settings, marked estimated', async () => {
+  test('R6 old order, no record of the earned bonus and a legacy bonus use: balances untouched, «needs reconciliation»', async () => {
     await setBonus(buyerId, 0);
-    const o = await paid(1, false);
+    const o = await paid(2, false);
+    // as an order paid before add-payme-refund.sql: nothing recorded about the purchase bonus,
+    // and bonus used the legacy way (deducted in the browser, no reservation)
+    await service.from('orders').update({ bonus_earned: null, referral_commission: null, referrer_user_id: null, bonus_points_used: 5000, bonus_reservation: null, bonus_reserved: null }).eq('order_number', o.n);
+    await setBonus(buyerId, 7777);
+    await setBonus(referrerId, 5555);
+    const s0 = await stock();
+    const res = (await payme('CancelTransaction', { id: o.tx, reason: 5 })).result;
+    expect(res.state).toBe(-2);
+    const r = await row(o.n);
+    expect(await bonus(buyerId)).toBe(7777);
+    expect(await bonus(referrerId)).toBe(5555);
+    expect(await stock()).toBe(s0 + 2);                     // the stock movement IS recorded (fulfilled_at)
+    expect(r).toMatchObject({ status: 'refunded', payme_state: -2 });
+    expect(r.refund).toMatchObject({ bonus_returned: 0, bonus_revoked: 0, bonus_shortfall: 0, referrer_revoked: 0, needs_reconciliation: true });
+    expect(r.refund.reconcile.sort()).toEqual(['bonus_earned_unrecorded', 'bonus_used_unconfirmed']);
+    expect((await payme('CancelTransaction', { id: o.tx, reason: 5 })).result).toEqual(res);   // repeat: same answer
+    expect(await bonus(buyerId)).toBe(7777);
+    console.log('RESULT', JSON.stringify({ R6: { buyer: '7777 → 7777', referrer: '5555 → 5555', stock: `${s0} → ${s0 + 2}`, refund: r.refund } }));
+  });
+
+  test('R6b old order paid with reserved bonus: the confirmed spent bonus is returned exactly, the unrecorded earned bonus is not touched', async () => {
+    await setBonus(buyerId, 20000);
+    const o = await paid(1, true);
+    const spent = o.used;
+    expect(spent).toBeGreaterThan(0);
     await service.from('orders').update({ bonus_earned: null, referral_commission: null, referrer_user_id: null }).eq('order_number', o.n);
-    const earned = pct(o.subtotal, cfg.purchase);
+    await setBonus(buyerId, 1000);
+    await setBonus(referrerId, 2000);
     await payme('CancelTransaction', { id: o.tx, reason: 5 });
     const r = await row(o.n);
-    expect(r.refund).toMatchObject({ amounts_estimated: true, bonus_revoked: earned, referrer_revoked: 0 });
-    expect(await bonus(buyerId)).toBe(0);
+    expect(await bonus(buyerId)).toBe(1000 + spent);
+    expect(await bonus(referrerId)).toBe(2000);
+    expect(r.refund).toMatchObject({ bonus_returned: spent, bonus_revoked: 0, needs_reconciliation: true, reconcile: ['bonus_earned_unrecorded'] });
+    console.log('RESULT', JSON.stringify({ R6b: { spent_returned: spent, buyer: `1000 → ${1000 + spent}`, referrer: '2000 → 2000', reconcile: r.refund.reconcile } }));
   });
 
   test('R7 two cancel notifications at the same time: one refund', async () => {

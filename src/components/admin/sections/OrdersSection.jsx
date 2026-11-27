@@ -580,6 +580,9 @@ const OrdersSection = ({ onImageClick }) => {
                     <span className={`a-pill ${pillClass(order.status)}`}>
                       {getStatusLabel(order.status)}
                     </span>
+                    {order.refund?.needs_reconciliation && (
+                      <span className="a-pill a-pill-danger ml-1">Sverka talab qilinadi</span>
+                    )}
                   </td>
                   <td>
                     <div className="flex gap-2 flex-wrap items-center">
@@ -853,12 +856,27 @@ const OrdersSection = ({ onImageClick }) => {
                           ? 'mahsulot qaytarildi'
                           : selectedOrder.refund?.stock === 'awaiting_return'
                           ? "mahsulot qaytib kelishi kutilmoqda — kelganda «Qabul qilindi» ni bosing"
-                          : "o'zgartirilmadi (buyurtma tizimda yakunlanmagan edi — qo'lda tekshiring)"}
+                          : "o'zgartirilmadi (buyurtma tizimda yakunlanmagan edi)"}
                       </div>
                       <div className="a-muted">
                         Bonus: {selectedOrder.refund?.bonus_returned || 0} ball qaytarildi, {selectedOrder.refund?.bonus_revoked || 0} ball bekor qilindi
-                        {selectedOrder.refund?.amounts_estimated ? ' (joriy sozlamalar bo\'yicha hisoblangan)' : ''}
                       </div>
+                      {selectedOrder.refund?.needs_reconciliation && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          <div className="font-medium">Sverka talab qilinadi</div>
+                          {(selectedOrder.refund.reconcile || []).map((r) => (
+                            <div key={r}>
+                              {r === 'bonus_earned_unrecorded'
+                                ? "Xarid uchun berilgan bonus miqdori operatsiyalar tarixida yo'q — mijoz va taklif qilgan mijoz balansi o'zgartirilmadi."
+                                : r === 'bonus_used_unconfirmed'
+                                ? `Buyurtmada ishlatilgan ${selectedOrder.bonusPointsUsed || 0} ball tarixda tasdiqlanmagan — qaytarilmadi.`
+                                : r === 'not_fulfilled'
+                                ? "Buyurtma tizimda yakunlanmagan — ombor va bonuslar o'zgartirilmadi."
+                                : r}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {selectedOrder.refund?.bonus_shortfall > 0 && (
                         <div style={{ color: 'var(--danger)' }}>
                           Mijoz {selectedOrder.refund.bonus_shortfall} ball bonusni allaqachon sarflagan — ular bekor qilinmadi.
