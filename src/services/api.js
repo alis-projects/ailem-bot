@@ -1214,6 +1214,31 @@ export const ordersAPI = {
 
   // The goods of a refunded, already shipped order came back: return them to
   // stock once (admin_confirm_return, add-payme-refund.sql). Returns the result.
+  // Bonus operations of one order (bonus_history) and the debts they touch
+  // (bonus_debts) — admins only (RLS)
+  async getBonusRecords(orderDbId) {
+    const { data: history, error } = await supabase
+      .from('bonus_history')
+      .select('id, user_id, kind, amount, debt_id, balance_after, debt_remaining_after, created_at')
+      .eq('order_id', String(orderDbId))
+      .order('id');
+    if (error) throw error;
+    const debtIds = [...new Set((history || []).map(h => h.debt_id).filter(Boolean))];
+    let debts = [];
+    if (debtIds.length) {
+      const res = await supabase.from('bonus_debts').select('id, user_id, order_id, role, amount, remaining, created_at').in('id', debtIds);
+      if (res.error) throw res.error;
+      debts = res.data || [];
+    }
+    const orderIds = [...new Set(debts.map(d => d.order_id))];
+    let numbers = {};
+    if (orderIds.length) {
+      const res = await supabase.from('orders').select('id, order_number').in('id', orderIds);
+      numbers = Object.fromEntries((res.data || []).map(o => [o.id, o.order_number]));
+    }
+    return { history: history || [], debts: debts.map(d => ({ ...d, orderNumber: numbers[d.order_id] || d.order_id })) };
+  },
+
   async confirmReturn(ref) {
     const { data, error } = await supabase.rpc('admin_confirm_return', { p_ref: String(ref) });
     if (error) throw error;

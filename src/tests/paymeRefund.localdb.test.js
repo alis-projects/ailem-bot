@@ -3,7 +3,7 @@
 // LOCAL stand: real /api/orders, /api/payme-webhook and admin RPC/REST.
 // Same env as ordersCheckout.localdb.test.js; refuses non-local URLs.
 import crypto from 'crypto';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
 
 const env = {
@@ -58,6 +58,17 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     return o;
   };
   const pct = (base, p) => Math.round(base * p / 100);
+  const debts = async (orderNumber) => {
+    const id = (await row(orderNumber)).id;
+    return (await service.from('bonus_debts').select('role, amount, remaining').eq('order_id', id).order('role')).data;
+  };
+  const history = async (orderNumber) => {
+    const id = (await row(orderNumber)).id;
+    return (await service.from('bonus_history').select('user_id, kind, amount, debt_id').eq('order_id', id).order('id')).data;
+  };
+  const clearDebts = async () => {
+    for (const t of ['bonus_history', 'bonus_debts']) await service.from(t).delete().in('user_id', [buyerId, referrerId].filter(Boolean));
+  };
 
   beforeAll(async () => {
     service = createClient(env.url, env.service, { auth: { persistSession: false } });
@@ -76,8 +87,11 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     cfg = { purchase: Number(c.purchaseBonus) || 1, commission: Number(c.referralCommission) || 3 };
   });
 
+  beforeEach(async () => { if (service) await clearDebts(); });
+
   afterAll(async () => {
     if (!service) return;
+    await clearDebts();
     await admin?.auth.signOut().catch(() => {});
     if (created.length) await service.from('orders').delete().in('order_number', created);
     if (productId) await service.from('products').delete().eq('id', productId);
@@ -160,6 +174,11 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     expect(await bonus(referrerId)).toBe(0);
     expect(r.refund).toMatchObject({ bonus_revoked: 4000, bonus_shortfall: earned - 4000, referrer_revoked: 1000, referrer_shortfall: comm - 1000, needs_reconciliation: false });
     expect(r).toMatchObject({ status: 'refunded', payme_state: -2 });
+    // the shortfall is a bonus debt, once per party; a repeated cancel adds nothing
+    expect(await debts(o.n)).toEqual([{ role: 'buyer', amount: earned - 4000, remaining: earned - 4000 }, { role: 'referrer', amount: comm - 1000, remaining: comm - 1000 }]);
+    await payme('CancelTransaction', { id: o.tx, reason: 5 });
+    expect((await debts(o.n)).length).toBe(2);
+    expect((await history(o.n)).filter(h => h.kind === 'debt_created').length).toBe(2);
     console.log('RESULT', JSON.stringify({ R3: { earned, buyer_balance_before_refund: 4000, refund: r.refund } }));
   });
 
@@ -227,6 +246,66 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     expect(await bonus(referrerId)).toBe(2000);
     expect(r.refund).toMatchObject({ bonus_returned: spent, bonus_revoked: 0, needs_reconciliation: true, reconcile: ['bonus_earned_unrecorded'] });
     console.log('RESULT', JSON.stringify({ R6b: { spent_returned: spent, buyer: `1000 → ${1000 + spent}`, referrer: '2000 → 2000', reconcile: r.refund.reconcile } }));
+  });
+
+  test('R8 debt repaid from the next accrual (once), and given back to the debt when that purchase is refunded (once)', async () => {
+    await setBonus(buyerId, 0);
+    await setBonus(referrerId, 0);
+    // D: refunded after the bonuses were spent → debts
+    const d = await paid(5, false);
+    const earnedD = pct(d.subtotal, cfg.purchase), commD = pct(d.subtotal, cfg.commission);
+    await setBonus(buyerId, 4000);
+    await setBonus(referrerId, 1000);
+    await payme('CancelTransaction', { id: d.tx, reason: 5 });
+    const debtB = earnedD - 4000, debtR = commD - 1000;
+    expect(await debts(d.n)).toEqual([{ role: 'buyer', amount: debtB, remaining: debtB }, { role: 'referrer', amount: debtR, remaining: debtR }]);
+
+    // E: the next purchase — its bonus repays the debt first, the rest goes to the balance
+    const e = await paid(5, false);
+    const earnedE = pct(e.subtotal, cfg.purchase), commE = pct(e.subtotal, cfg.commission);
+    expect(await debts(d.n)).toEqual([{ role: 'buyer', amount: debtB, remaining: 0 }, { role: 'referrer', amount: debtR, remaining: 0 }]);
+    expect(await bonus(buyerId)).toBe(earnedE - debtB);
+    expect(await bonus(referrerId)).toBe(commE - debtR);
+    const hE = await history(e.n);
+    expect(hE.filter(h => h.kind === 'debt_repaid').map(h => h.amount).sort((a, b) => a - b)).toEqual([debtB, debtR].sort((a, b) => a - b));
+    expect(hE.filter(h => h.kind === 'earned').map(h => h.amount)).toEqual([earnedE - debtB]);
+    expect(hE.filter(h => h.kind === 'commission').map(h => h.amount)).toEqual([commE - debtR]);
+    expect((await row(e.n)).bonus_earned).toBe(earnedE);      // the whole accrual is recorded on the order
+
+    // a repeated PerformTransaction does not repay or credit again
+    expect((await payme('PerformTransaction', { id: e.tx })).result.state).toBe(2);
+    expect(await history(e.n)).toEqual(hE);
+    expect(await bonus(buyerId)).toBe(earnedE - debtB);
+
+    // E refunded after the buyer spent part of the rest: the repaid part goes back on D's debt,
+    // what is left on the balance is revoked, the remainder is a new debt for E
+    await setBonus(buyerId, 1000);
+    const totalE = (await row(e.n)).total;
+    const res = (await payme('CancelTransaction', { id: e.tx, reason: 5 })).result;
+    expect(res.state).toBe(-2);
+    const rE = await row(e.n);
+    expect(rE.total).toBe(totalE);                                  // the card refund is not reduced
+    expect(await debts(d.n)).toEqual([{ role: 'buyer', amount: debtB, remaining: debtB }, { role: 'referrer', amount: debtR, remaining: debtR }]);
+    expect(await debts(e.n)).toEqual([{ role: 'buyer', amount: earnedE - debtB - 1000, remaining: earnedE - debtB - 1000 }]);
+    expect(await bonus(buyerId)).toBe(0);
+    expect(await bonus(referrerId)).toBe(0);
+    expect(rE.refund).toMatchObject({ bonus_debt_restored: debtB, bonus_revoked: 1000, bonus_shortfall: earnedE - debtB - 1000, referrer_debt_restored: debtR, referrer_revoked: commE - debtR, referrer_shortfall: 0 });
+
+    // repeated cancel: nothing restored or created again
+    const hAfter = await history(e.n);
+    expect((await payme('CancelTransaction', { id: e.tx, reason: 5 })).result).toEqual(res);
+    expect(await history(e.n)).toEqual(hAfter);
+    expect(hAfter.filter(h => h.kind === 'debt_restored').length).toBe(2);
+    expect((await debts(d.n)).map(x => x.remaining)).toEqual([debtB, debtR]);
+    expect((await debts(e.n)).map(x => x.remaining)).toEqual([earnedE - debtB - 1000]);
+    console.log('RESULT', JSON.stringify({ R8: {
+      D_debts: { buyer: debtB, referrer: debtR },
+      E_accrual: { buyer: earnedE, to_debt: debtB, to_balance: earnedE - debtB, referrer: commE, ref_to_debt: debtR, ref_to_balance: commE - debtR },
+      repeated_perform: 'no change',
+      E_refund: { buyer_balance_before: 1000, restored_to_D: debtB, revoked: 1000, new_debt_E: earnedE - debtB - 1000, referrer_restored_to_D: debtR, referrer_revoked: commE - debtR, card_total: totalE },
+      repeated_cancel: 'no change',
+      history_E: hAfter.map(h => `${h.kind}:${h.amount}`)
+    } }));
   });
 
   test('R7 two cancel notifications at the same time: one refund', async () => {

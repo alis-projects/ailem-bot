@@ -368,6 +368,9 @@ export const AdminProvider = ({ children }) => {
   // Returned goods of a refunded order were received: back to stock once
   // (admin_confirm_return). Throws with .code 'not_awaiting_return' /
   // 'not_found' when nothing changed; 'already_received' is not an error.
+  // Bonus history / debts of one order, for the order card
+  const getBonusRecords = async (order) => ordersAPI.getBonusRecords(order?.dbId || order?.id);
+
   const confirmReturn = async (orderId) => {
     const order = orders.find(o => o.id === orderId || o.dbId === orderId);
     const result = await ordersAPI.confirmReturn(order?.dbId || orderId);
@@ -739,6 +742,7 @@ export const AdminProvider = ({ children }) => {
     approveOrder,
     rejectOrder,
     confirmReturn,
+    getBonusRecords,
     deleteOrder,
     reviews,
     addReview,

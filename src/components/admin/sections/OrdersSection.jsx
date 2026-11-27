@@ -1,4 +1,4 @@
-import { useState, useContext, useMemo } from 'react';
+import { useState, useContext, useMemo, useEffect } from 'react';
 import {
   X, Users as UsersIcon, Truck, ShoppingBag, DollarSign,
   Download, FileDown, RotateCw, Package, Printer
@@ -13,12 +13,24 @@ import { printShippingLabel, printMultipleLabels } from '../../../utils/shipping
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
 
 const OrdersSection = ({ onImageClick }) => {
-  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn } = useContext(AdminContext);
+  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn, getBonusRecords } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all', 'online', 'cash'
   const [selectedOrder, setSelectedOrder] = useState(null);
+  const [bonusRecords, setBonusRecords] = useState(null);
+
+  // Bonus history of the open order (accruals, debt repayments, refunds, debts)
+  useEffect(() => {
+    let alive = true;
+    setBonusRecords(null);
+    if (!selectedOrder || !getBonusRecords) return undefined;
+    getBonusRecords(selectedOrder)
+      .then(r => { if (alive) setBonusRecords(r); })
+      .catch(e => console.error('Failed to load bonus history:', e));
+    return () => { alive = false; };
+  }, [selectedOrder?.dbId, selectedOrder?.refundedAt, getBonusRecords]);
   const [selectedOrders, setSelectedOrders] = useState([]);
   const [bulkAction, setBulkAction] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -879,7 +891,7 @@ const OrdersSection = ({ onImageClick }) => {
                       )}
                       {selectedOrder.refund?.bonus_shortfall > 0 && (
                         <div style={{ color: 'var(--danger)' }}>
-                          Mijoz {selectedOrder.refund.bonus_shortfall} ball bonusni allaqachon sarflagan — ular bekor qilinmadi.
+                          Mijoz {selectedOrder.refund.bonus_shortfall} ball bonusni allaqachon sarflagan — bonus qarzi sifatida yozildi, keyingi bonuslardan avtomatik to'lanadi.
                         </div>
                       )}
                       {selectedOrder.refund?.referrer_revoked > 0 && (
@@ -887,9 +899,34 @@ const OrdersSection = ({ onImageClick }) => {
                       )}
                       {selectedOrder.refund?.referrer_shortfall > 0 && (
                         <div style={{ color: 'var(--danger)' }}>
-                          Taklif qilgan mijoz {selectedOrder.refund.referrer_shortfall} ball bonusni allaqachon sarflagan.
+                          Taklif qilgan mijoz {selectedOrder.refund.referrer_shortfall} ball bonusni allaqachon sarflagan — bonus qarzi sifatida yozildi.
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {bonusRecords?.history?.length > 0 && (
+                    <div role="group" aria-label="Bonus tarixi" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)' }}>
+                      <div className="font-medium" style={{ color: 'var(--text)' }}>Bonus tarixi</div>
+                      {bonusRecords.history.map((h) => {
+                        const debt = bonusRecords.debts.find(d => d.id === h.debt_id);
+                        const isBuyer = debt ? debt.role === 'buyer' : String(h.user_id) === String(selectedOrder.userId);
+                        const who = isBuyer ? 'Mijoz' : 'Taklif qilgan mijoz';
+                        const ref = debt ? ` (qarz #${debt.orderNumber}, qoldi ${h.debt_remaining_after ?? debt.remaining} ball)` : '';
+                        const text = {
+                          earned: `Mijozga bonus: +${h.amount} ball`,
+                          commission: `Taklif qilgan mijozga komissiya: +${h.amount} ball`,
+                          debt_repaid: `${who}: ${h.amount} ball bonus qarzini to'lashga ketdi${ref}`,
+                          refund_returned: `Mijozga ishlatilgan ${h.amount} ball qaytarildi`,
+                          refund_revoked: `${isBuyer ? 'Mijozdan' : 'Taklif qilgan mijozdan'} ${h.amount} ball bekor qilindi`,
+                          debt_created: `${who}: ${h.amount} ball bonus qarzi yozildi${debt ? ` (hozir qoldi ${debt.remaining} ball)` : ''}`,
+                          debt_restored: `${who}: ${h.amount} ball qarzga qaytarildi — bu buyurtma bonusi bilan to'langan edi${ref}`
+                        }[h.kind] || `${h.kind}: ${h.amount}`;
+                        const danger = h.kind === 'debt_created' || h.kind === 'debt_restored';
+                        return (
+                          <div key={h.id} className={danger ? '' : 'a-muted'} style={danger ? { color: 'var(--danger)' } : undefined}>{text}</div>
+                        );
+                      })}
                     </div>
                   )}
 

@@ -17,8 +17,14 @@
 --       public.admin_confirm_return(ref) (admin) returns the goods to stock
 --       once after the admin confirms they were received → 'refunded'
 --   * a balance never goes below 0: if the earned bonus was already spent,
---       the missing amount is recorded (refund.bonus_shortfall /
---       refund.referrer_shortfall) and shown to the admin
+--       the part still on the balance is revoked and the rest becomes a bonus
+--       debt (public.bonus_debts, once per order and party)
+--   * bonus debts are repaid automatically from later accruals (purchase
+--       bonus, referral commission), oldest debt first; every repayment is a
+--       row in public.bonus_history
+--   * refunding an order whose bonus went to repay a debt puts exactly that
+--       amount back on the debt (once: unique history row per order/debt)
+--   * the card payment refunded by Payme is never reduced
 --   * an unpaid transaction (state 1) is unchanged: 'rejected', -1
 -- fulfill_order now records what it credited (bonus_earned,
 -- referral_commission, referrer_user_id) so a refund revokes exactly that;
@@ -70,7 +76,151 @@ ALTER TABLE public.orders ADD CONSTRAINT valid_status CHECK (status = ANY (ARRAY
   'pending', 'approved', 'shipped', 'delivered', 'rejected', 'completed', 'refunded', 'return_pending'
 ]::text[]));
 
--- 2. fulfill_order: unchanged, plus it records the bonuses it credited
+-- 1b. Bonus debts and bonus history (1 ball = 1 so'm)
+CREATE TABLE IF NOT EXISTS public.bonus_debts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  order_id text NOT NULL,                 -- the refunded order that created it
+  role text NOT NULL CHECK (role IN ('buyer', 'referrer')),
+  amount integer NOT NULL CHECK (amount > 0),
+  remaining integer NOT NULL CHECK (remaining >= 0 AND remaining <= amount),
+  source text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (order_id, role)
+);
+CREATE INDEX IF NOT EXISTS bonus_debts_open ON public.bonus_debts (user_id, created_at) WHERE remaining > 0;
+
+CREATE TABLE IF NOT EXISTS public.bonus_history (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id uuid NOT NULL,
+  order_id text,                          -- the order this operation belongs to
+  debt_id uuid,
+  kind text NOT NULL CHECK (kind IN ('earned', 'commission', 'debt_repaid',
+    'refund_returned', 'refund_revoked', 'debt_created', 'debt_restored')),
+  amount integer NOT NULL CHECK (amount > 0),
+  balance_after integer,
+  debt_remaining_after integer,
+  source text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+-- each operation at most once per order, user and debt
+CREATE UNIQUE INDEX IF NOT EXISTS bonus_history_once ON public.bonus_history
+  (kind, COALESCE(order_id, ''), user_id, COALESCE(debt_id, '00000000-0000-0000-0000-000000000000'::uuid));
+CREATE INDEX IF NOT EXISTS bonus_history_order ON public.bonus_history (order_id);
+CREATE INDEX IF NOT EXISTS bonus_history_user ON public.bonus_history (user_id, created_at);
+
+ALTER TABLE public.bonus_debts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bonus_history ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.bonus_debts, public.bonus_history FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.bonus_debts, public.bonus_history TO authenticated;     -- admins only (policy)
+GRANT SELECT, INSERT, UPDATE ON public.bonus_debts, public.bonus_history TO service_role;
+DROP POLICY IF EXISTS bonus_debts_admin_read ON public.bonus_debts;
+CREATE POLICY bonus_debts_admin_read ON public.bonus_debts FOR SELECT TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS bonus_history_admin_read ON public.bonus_history;
+CREATE POLICY bonus_history_admin_read ON public.bonus_history FOR SELECT TO authenticated USING (public.is_admin());
+
+-- Credit an accrual: open debts first (oldest first), the rest to the balance.
+-- Caller holds the user row lock. Returns the amount that went to debts.
+CREATE OR REPLACE FUNCTION payment_internal.credit_bonus(p_user uuid, p_amount integer, p_order text, p_kind text, p_source text)
+ RETURNS integer
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  d record;
+  v_left integer := COALESCE(p_amount, 0);
+  v_pay integer;
+  v_repaid integer := 0;
+  v_bal integer;
+BEGIN
+  IF v_left <= 0 OR NOT EXISTS (SELECT 1 FROM public.users WHERE id = p_user) THEN
+    RETURN 0;
+  END IF;
+  SELECT COALESCE(bonus_points, 0) INTO v_bal FROM public.users WHERE id = p_user;
+  FOR d IN SELECT id, remaining FROM public.bonus_debts
+           WHERE user_id = p_user AND remaining > 0 ORDER BY created_at, id FOR UPDATE LOOP
+    EXIT WHEN v_left = 0;
+    v_pay := LEAST(v_left, d.remaining);
+    UPDATE public.bonus_debts SET remaining = remaining - v_pay WHERE id = d.id;
+    INSERT INTO public.bonus_history (user_id, order_id, debt_id, kind, amount, balance_after, debt_remaining_after, source)
+    VALUES (p_user, p_order, d.id, 'debt_repaid', v_pay, v_bal, d.remaining - v_pay, p_source);
+    v_left := v_left - v_pay;
+    v_repaid := v_repaid + v_pay;
+  END LOOP;
+  IF v_left > 0 THEN
+    UPDATE public.users SET bonus_points = COALESCE(bonus_points, 0) + v_left WHERE id = p_user
+    RETURNING bonus_points INTO v_bal;
+    INSERT INTO public.bonus_history (user_id, order_id, kind, amount, balance_after, source)
+    VALUES (p_user, p_order, p_kind, v_left, v_bal, p_source);
+  END IF;
+  RETURN v_repaid;
+END;
+$$;
+
+-- Undo one party's accrual for a refunded order (caller holds the user lock):
+--   1. what this order's accrual repaid goes back onto those debts (once)
+--   2. the rest is revoked from the balance (+ the spent bonus returned first)
+--   3. what the balance cannot cover becomes a debt (once per order and role)
+CREATE OR REPLACE FUNCTION payment_internal.revoke_bonus(p_user uuid, p_order text, p_role text, p_earned integer, p_return integer, p_source text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  h record;
+  v_rem integer;
+  v_restored integer := 0;
+  v_bal integer;
+  v_in integer;
+  v_new integer;
+  v_short integer := 0;
+  v_debt uuid;
+BEGIN
+  SELECT COALESCE(bonus_points, 0) INTO v_bal FROM public.users WHERE id = p_user;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('returned', 0, 'revoked', 0, 'shortfall', 0, 'restored', 0, 'debt_id', NULL);
+  END IF;
+  FOR h IN SELECT debt_id, amount FROM public.bonus_history
+           WHERE order_id = p_order AND user_id = p_user AND kind = 'debt_repaid' ORDER BY id LOOP
+    UPDATE public.bonus_debts SET remaining = remaining + h.amount WHERE id = h.debt_id
+    RETURNING remaining INTO v_rem;
+    INSERT INTO public.bonus_history (user_id, order_id, debt_id, kind, amount, balance_after, debt_remaining_after, source)
+    VALUES (p_user, p_order, h.debt_id, 'debt_restored', h.amount, v_bal, v_rem, p_source);
+    v_restored := v_restored + h.amount;
+  END LOOP;
+  v_in := GREATEST(COALESCE(p_earned, 0) - v_restored, 0);
+  v_new := v_bal + COALESCE(p_return, 0) - v_in;
+  IF v_new < 0 THEN
+    v_short := -v_new;
+    v_new := 0;
+  END IF;
+  UPDATE public.users SET bonus_points = v_new WHERE id = p_user;
+  IF COALESCE(p_return, 0) > 0 THEN
+    INSERT INTO public.bonus_history (user_id, order_id, kind, amount, balance_after, source)
+    VALUES (p_user, p_order, 'refund_returned', p_return, v_bal + p_return, p_source);
+  END IF;
+  IF v_in - v_short > 0 THEN
+    INSERT INTO public.bonus_history (user_id, order_id, kind, amount, balance_after, source)
+    VALUES (p_user, p_order, 'refund_revoked', v_in - v_short, v_new, p_source);
+  END IF;
+  IF v_short > 0 THEN
+    INSERT INTO public.bonus_debts (user_id, order_id, role, amount, remaining, source)
+    VALUES (p_user, p_order, p_role, v_short, v_short, p_source)
+    RETURNING id INTO v_debt;
+    INSERT INTO public.bonus_history (user_id, order_id, debt_id, kind, amount, balance_after, debt_remaining_after, source)
+    VALUES (p_user, p_order, v_debt, 'debt_created', v_short, v_new, v_short, p_source);
+  END IF;
+  RETURN jsonb_build_object('returned', COALESCE(p_return, 0), 'revoked', v_in - v_short,
+    'shortfall', v_short, 'restored', v_restored, 'debt_id', v_debt);
+END;
+$$;
+REVOKE ALL ON FUNCTION payment_internal.credit_bonus(uuid, integer, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION payment_internal.revoke_bonus(uuid, text, text, integer, integer, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION payment_internal.credit_bonus(uuid, integer, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION payment_internal.revoke_bonus(uuid, text, text, integer, integer, text) TO service_role;
+
+-- 2. fulfill_order: unchanged, plus it records the bonuses it credited and
+--    credits them through credit_bonus (open debts are repaid first)
 CREATE OR REPLACE FUNCTION payment_internal.fulfill_order(p_order_id text, p_source text, p_base_subtotal boolean, p_referral boolean)
  RETURNS boolean
  LANGUAGE plpgsql
@@ -117,16 +267,12 @@ BEGIN
       -- Lock buyer and referrer in id order
       PERFORM 1 FROM public.users WHERE id IN (v_buyer, v_referrer) ORDER BY id FOR UPDATE;
       v_earned := payment_internal.js_round(v_base * v_purchase / 100);
-      UPDATE public.users
-      SET bonus_points = COALESCE(bonus_points, 0) + v_earned,
-          total_orders = COALESCE(total_orders, 0) + 1
-      WHERE id = v_buyer;
+      PERFORM payment_internal.credit_bonus(v_buyer, v_earned, o.id, 'earned', p_source);
+      UPDATE public.users SET total_orders = COALESCE(total_orders, 0) + 1 WHERE id = v_buyer;
       IF v_referrer IS NOT NULL THEN
         v_comm := payment_internal.js_round(v_base * v_commission / 100);
-        UPDATE public.users
-        SET bonus_points = COALESCE(bonus_points, 0) + v_comm,
-            referrals = COALESCE(referrals, 0) + 1
-        WHERE id = v_referrer;
+        PERFORM payment_internal.credit_bonus(v_referrer, v_comm, o.id, 'commission', p_source);
+        UPDATE public.users SET referrals = COALESCE(referrals, 0) + 1 WHERE id = v_referrer;
       END IF;
     END IF;
   END IF;
@@ -155,9 +301,8 @@ DECLARE
   v_comm integer := 0;
   v_referrer uuid;
   v_reconcile text[] := ARRAY[]::text[];
-  v_balance integer;
-  v_short integer := 0;
-  v_ref_short integer := 0;
+  b jsonb := '{"returned":0,"revoked":0,"shortfall":0,"restored":0}'::jsonb;
+  r jsonb := '{"returned":0,"revoked":0,"shortfall":0,"restored":0}'::jsonb;
   v_rec jsonb;
 BEGIN
   SELECT * INTO o FROM public.orders WHERE id = p_order_id FOR UPDATE;
@@ -205,38 +350,21 @@ BEGIN
     END IF;
 
     PERFORM 1 FROM public.users WHERE id IN (v_buyer, v_referrer) ORDER BY id FOR UPDATE;
-    SELECT COALESCE(bonus_points, 0) INTO v_balance FROM public.users WHERE id = v_buyer;
-    IF FOUND THEN
-      v_balance := v_balance + v_returned - v_earned;
-      IF v_balance < 0 THEN
-        v_short := -v_balance;
-        v_balance := 0;
-      END IF;
-      UPDATE public.users
-      SET bonus_points = v_balance,
-          total_orders = GREATEST(COALESCE(total_orders, 0) - 1, 0)
-      WHERE id = v_buyer;
-    END IF;
+    b := payment_internal.revoke_bonus(v_buyer, o.id, 'buyer', v_earned, v_returned, p_source);
+    UPDATE public.users SET total_orders = GREATEST(COALESCE(total_orders, 0) - 1, 0) WHERE id = v_buyer;
     IF v_referrer IS NOT NULL AND v_comm > 0 THEN
-      SELECT COALESCE(bonus_points, 0) INTO v_balance FROM public.users WHERE id = v_referrer;
-      IF FOUND THEN
-        v_balance := v_balance - v_comm;
-        IF v_balance < 0 THEN
-          v_ref_short := -v_balance;
-          v_balance := 0;
-        END IF;
-        UPDATE public.users
-        SET bonus_points = v_balance, referrals = GREATEST(COALESCE(referrals, 0) - 1, 0)
-        WHERE id = v_referrer;
-      END IF;
+      r := payment_internal.revoke_bonus(v_referrer, o.id, 'referrer', v_comm, 0, p_source);
+      UPDATE public.users SET referrals = GREATEST(COALESCE(referrals, 0) - 1, 0) WHERE id = v_referrer;
     END IF;
   END IF;
 
   v_rec := jsonb_build_object(
     'source', p_source, 'at', now(), 'fulfilled', true,
     'stock', CASE WHEN p_restock THEN 'returned' ELSE 'awaiting_return' END,
-    'bonus_returned', v_returned, 'bonus_revoked', v_earned - v_short, 'bonus_shortfall', v_short,
-    'referrer', v_referrer, 'referrer_revoked', v_comm - v_ref_short, 'referrer_shortfall', v_ref_short,
+    'bonus_returned', (b->>'returned')::int, 'bonus_revoked', (b->>'revoked')::int,
+    'bonus_shortfall', (b->>'shortfall')::int, 'bonus_debt_restored', (b->>'restored')::int, 'bonus_debt_id', b->'debt_id',
+    'referrer', v_referrer, 'referrer_revoked', (r->>'revoked')::int,
+    'referrer_shortfall', (r->>'shortfall')::int, 'referrer_debt_restored', (r->>'restored')::int, 'referrer_debt_id', r->'debt_id',
     'needs_reconciliation', cardinality(v_reconcile) > 0, 'reconcile', to_jsonb(v_reconcile));
   UPDATE public.orders SET refunded_at = now(), refund = v_rec WHERE id = o.id;
   RETURN v_rec;
