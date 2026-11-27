@@ -81,6 +81,50 @@ describe('cart amounts = server amounts', () => {
   });
 });
 
+// Business rule kept on purpose (since 2026-01-30, «mixed bulk»): DIFFERENT
+// products whose bulk tiers start at the same quantity count together.
+// 3 + 2 pieces with a shared threshold of 5 → both at their bulk price.
+describe('mixed bulk: same first-tier threshold combines different products', () => {
+  const SOCHIQ = { id: 'tg-a', name: 'Sochiq', price: 50000, stock: 50, visible: true, variants: [], volume_pricing: [{ min_qty: 5, max_qty: null, price: 45000 }] };
+  const PLED = { id: 'tg-b', name: 'Pled', price: 80000, stock: 50, visible: true, variants: [], volume_pricing: [{ min_qty: 5, max_qty: null, price: 70000 }] };
+  const MIXED = [SOCHIQ, PLED];
+  const cart = () => [
+    { cartItemId: 'tg-a', id: 'tg-a', name: 'Sochiq', quantity: 3, price: 50000, image: 'x.jpg' },
+    { cartItemId: 'tg-b', id: 'tg-b', name: 'Pled', quantity: 2, price: 80000, image: 'x.jpg' }
+  ];
+
+  test('3 + 2 with a shared threshold of 5: cart and server both 275 000 (not 310 000 retail)', () => {
+    const quote = priceOrder({ products: MIXED, delivery: { courier: SELF_PICKUP_COURIER },
+      lines: [{ productId: 'tg-a', quantity: 3 }, { productId: 'tg-b', quantity: 2 }] });
+    expect(quote.items.map(i => i.price)).toEqual([45000, 70000]);
+    expect(quote.subtotal).toBe(275000);
+    const live = liveCartLines(cart(), MIXED);
+    expect(live.reduce((s, i) => s + calculateItemTotalWithTierGrouping(i, live), 0)).toBe(275000);
+  });
+
+  test('different thresholds do not combine: 3 + 2 stays retail', () => {
+    const other = { ...PLED, volume_pricing: [{ min_qty: 4, max_qty: null, price: 70000 }] };
+    const quote = priceOrder({ products: [SOCHIQ, other], delivery: { courier: SELF_PICKUP_COURIER },
+      lines: [{ productId: 'tg-a', quantity: 3 }, { productId: 'tg-b', quantity: 2 }] });
+    expect(quote.subtotal).toBe(310000);
+    const live = liveCartLines(cart(), [SOCHIQ, other]);
+    expect(live.reduce((s, i) => s + calculateItemTotalWithTierGrouping(i, live), 0)).toBe(310000);
+  });
+
+  test('cart page shows 275 000 and says the products were combined', () => {
+    m.cart = cart();
+    render(
+      <AdminContext.Provider value={{ products: MIXED }}>
+        <UserContext.Provider value={{ user: null, toggleFavorite: vi.fn(), isFavorite: () => false }}>
+          <CartContext.Provider value={{ addToCart: vi.fn() }}><CartPage onNavigate={vi.fn()} /></CartContext.Provider>
+        </UserContext.Provider>
+      </AdminContext.Provider>
+    );
+    expect(screen.getAllByText(formatPrice(275000)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/2 xil mahsulot birlashtirilgan \(5 dona jami\)/)).toHaveLength(2);
+  });
+});
+
 describe('«Savatga qo\'shish» total = server total for that quantity', () => {
   const cases = [['plain product (shared tiers)', PLAIN, null], ['variant with own tiers', VAR, VAR.variants[0]], ['variant using shared tiers', VAR, VAR.variants[1]]];
   test.each(cases)('%s, 1..12 pcs', (_, product, variant) => {
