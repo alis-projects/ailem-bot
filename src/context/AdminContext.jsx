@@ -8,6 +8,7 @@ import { categoryNameKey } from '../utils/validation';
 import { newOperationId } from '../utils/operationId';
 import { cleanupUnusedImage } from '../utils/storageCleanup';
 import { logAuditAction, AUDIT_ACTIONS } from '../services/auditLog';
+import { productSnapshot, productChanges } from '../utils/productAudit';
 
 export const AdminContext = createContext();
 
@@ -144,12 +145,34 @@ export const AdminProvider = ({ children }) => {
     await loadDeferredData();
   };
 
-  // Product management
-  const addProduct = async (product) => {
+  // Product management. Every successful admin change is written to the audit
+  // log (who/when are stamped by the database from the verified session); a
+  // failed or refused save throws before logging, so it leaves no entry.
+  // Stock taken by payments/order approval is changed by database functions,
+  // not here, and is not logged as an admin product edit.
+  // The audit entry is sent AFTER the change succeeded and is not awaited: a
+  // slow or failed entry never delays, fails or undoes the saved change (so
+  // the admin always sees it saved and does not repeat it). When the entry
+  // could not be written, options.onAuditFailed(entry) is called.
+  const logProductAudit = (entry, onAuditFailed) => {
+    logAuditAction(entry).then(ok => {
+      if (!ok && onAuditFailed) onAuditFailed(entry);
+    });
+  };
+
+  //   options.copyOf: { id, name } of the product this one was copied from
+  const addProduct = async (product, { copyOf = null, onAuditFailed } = {}) => {
     try {
       const newProduct = await productsAPI.create(product);
       // Add new product at the beginning to match descending created_at order
       setProducts(prev => [newProduct, ...prev]);
+      logProductAudit({
+        action: copyOf ? AUDIT_ACTIONS.PRODUCT_COPY : AUDIT_ACTIONS.PRODUCT_CREATE,
+        entityType: 'product',
+        entityId: newProduct.id,
+        newData: productSnapshot(newProduct),
+        metadata: { name: newProduct.name, ...(copyOf ? { copied_from_id: copyOf.id, copied_from_name: copyOf.name } : {}) }
+      }, onAuditFailed);
       return newProduct;
     } catch (err) {
       console.error('Failed to add product:', err);
@@ -157,14 +180,29 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
-  const updateProduct = async (productId, updates, options) => {
+  //   options.expectedUpdatedAt: see productsAPI.update
+  //   options.before: the full record the edit started from (the form loads it);
+  //     the audit entry lists only the fields that changed against it
+  const updateProduct = async (productId, updates, { before = null, onAuditFailed, ...options } = {}) => {
     try {
+      const previous = before || products.find(p => p.id === productId) || null;
       const updatedProduct = await productsAPI.update(productId, updates, options);
       setProducts(prev =>
         prev.map(product =>
           product.id === productId ? updatedProduct : product
         )
       );
+      const { oldData, newData, fields } = productChanges(previous, updatedProduct);
+      if (fields.length > 0) {
+        logProductAudit({
+          action: AUDIT_ACTIONS.PRODUCT_UPDATE,
+          entityType: 'product',
+          entityId: productId,
+          oldData,
+          newData,
+          metadata: { name: updatedProduct.name, changed_fields: fields }
+        }, onAuditFailed);
+      }
       return updatedProduct;
     } catch (err) {
       console.error('Failed to update product:', err);
@@ -172,9 +210,16 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
-  const deleteProduct = async (productId) => {
+  const deleteProduct = async (productId, { onAuditFailed } = {}) => {
     try {
       const product = products.find(p => p.id === productId);
+      // Full record for the audit entry (the catalog may be the lightweight one)
+      let fullRecord = null;
+      try {
+        fullRecord = await productsAPI.getById(productId);
+      } catch (e) {
+        console.error('Failed to load the full product before deleting:', e);
+      }
 
       // Clean up storage images (non-blocking)
       if (product) {
@@ -192,6 +237,14 @@ export const AdminProvider = ({ children }) => {
 
       await productsAPI.delete(productId);
       setProducts(prev => prev.filter(product => product.id !== productId));
+      const deleted = fullRecord || product;
+      logProductAudit({
+        action: AUDIT_ACTIONS.PRODUCT_DELETE,
+        entityType: 'product',
+        entityId: productId,
+        oldData: productSnapshot(deleted),
+        metadata: { name: deleted?.name ?? null }
+      }, onAuditFailed);
     } catch (err) {
       console.error('Failed to delete product:', err);
       throw err;
@@ -610,14 +663,23 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
-  const toggleProductVisibility = async (productId, visible) => {
+  const toggleProductVisibility = async (productId, visible, { onAuditFailed } = {}) => {
     try {
+      const previous = products.find(p => p.id === productId);
       const updatedProduct = await productsAPI.toggleVisibility(productId, visible);
       setProducts(prev =>
         prev.map(product =>
           product.id === productId ? { ...product, visible } : product
         )
       );
+      logProductAudit({
+        action: visible ? AUDIT_ACTIONS.PRODUCT_PUBLISH : AUDIT_ACTIONS.PRODUCT_HIDE,
+        entityType: 'product',
+        entityId: productId,
+        oldData: { visible: previous ? previous.visible !== false : null },
+        newData: { visible },
+        metadata: { name: updatedProduct?.name ?? previous?.name ?? null }
+      }, onAuditFailed);
       return updatedProduct;
     } catch (err) {
       console.error('Failed to toggle product visibility:', err);

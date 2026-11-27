@@ -332,7 +332,7 @@ describe('Editing colours/sizes keeps variant data (audit #12)', () => {
     const reserved = structuredClone(VARIANTS); reserved[0].stock = 0;
     m.db.products.set('p1', { ...m.db.products.get('p1'), variants: reserved, updated_at: 'T2' });
     await act(async () => { fireEvent.click(saveButton()); });
-    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledWith('p1', expect.anything(), { expectedUpdatedAt: 'T1' }));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledWith('p1', expect.anything(), expect.objectContaining({ expectedUpdatedAt: 'T1' })));
     expect(await screen.findByText(/ochganingizdan keyin o'zgargan/)).toBeInTheDocument();
     expect(stored()).toEqual(reserved);                          // the reserved stock was not overwritten
   });

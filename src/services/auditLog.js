@@ -11,6 +11,9 @@ export const AUDIT_ACTIONS = {
   PRODUCT_CREATE: 'product.create',
   PRODUCT_UPDATE: 'product.update',
   PRODUCT_DELETE: 'product.delete',
+  PRODUCT_COPY: 'product.copy',
+  PRODUCT_HIDE: 'product.hide',
+  PRODUCT_PUBLISH: 'product.publish',
 
   // Order actions
   ORDER_APPROVE: 'order.approve',
@@ -55,8 +58,14 @@ export const AUDIT_ACTIONS = {
   REVIEW_MODERATE: 'review.moderate',
 };
 
+// An entry that takes longer than this is reported as not written (the
+// action it describes has already succeeded and is never held up by it)
+export const AUDIT_TIMEOUT_MS = 10000;
+
 /**
- * Log an admin action to the audit trail
+ * Log an admin action to the audit trail. Never throws.
+ * @returns {Promise<boolean>} true when the entry was written, false when it
+ *   failed or did not answer within AUDIT_TIMEOUT_MS
  * @param {Object} params - Audit log parameters
  * @param {string} params.action - Action type from AUDIT_ACTIONS
  * @param {string} params.entityType - Type of entity (product, order, etc.)
@@ -72,7 +81,8 @@ export const logAuditAction = async ({
   oldData = null,
   newData = null,
   metadata = {}
-}) => {
+}, { timeoutMs = AUDIT_TIMEOUT_MS } = {}) => {
+  let timer;
   try {
     // Get current admin user
     const { data: { session } } = await supabase.auth.getSession();
@@ -93,19 +103,22 @@ export const logAuditAction = async ({
       created_at: new Date().toISOString()
     };
 
-    const { error } = await supabase
-      .from('audit_logs')
-      .insert([auditEntry]);
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve({ error: new Error('audit log timeout') }), timeoutMs); });
+    const { error } = await Promise.race([supabase.from('audit_logs').insert([auditEntry]), timeout]);
 
     if (error) {
       console.error('Failed to log audit action:', error);
       // Don't throw - audit logging shouldn't break the main operation
-    } else {
-      console.log(`[AUDIT] ${action} on ${entityType}:${entityId} by ${adminEmail}`);
+      return false;
     }
+    console.log(`[AUDIT] ${action} on ${entityType}:${entityId} by ${adminEmail}`);
+    return true;
   } catch (err) {
     console.error('Audit logging error:', err);
     // Silent fail - don't break main operations
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 };
 
@@ -175,6 +188,9 @@ export const formatAuditAction = (action) => {
     [AUDIT_ACTIONS.PRODUCT_CREATE]: 'Created product',
     [AUDIT_ACTIONS.PRODUCT_UPDATE]: 'Updated product',
     [AUDIT_ACTIONS.PRODUCT_DELETE]: 'Deleted product',
+    [AUDIT_ACTIONS.PRODUCT_COPY]: 'Copied product',
+    [AUDIT_ACTIONS.PRODUCT_HIDE]: 'Hid product',
+    [AUDIT_ACTIONS.PRODUCT_PUBLISH]: 'Published product',
     [AUDIT_ACTIONS.ORDER_APPROVE]: 'Approved order',
     [AUDIT_ACTIONS.ORDER_REJECT]: 'Rejected order',
     [AUDIT_ACTIONS.ORDER_SHIP]: 'Marked order as shipped',

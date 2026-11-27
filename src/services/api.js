@@ -482,14 +482,19 @@ export const productsAPI = {
     }
   },
 
-  // Delete product
+  // Delete product. Throws unless a row was really deleted (RLS or an already
+  // deleted product return no error and no row): callers log only real deletes.
   async delete(id) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('products')
       .delete()
-      .eq('id', id);
+      .eq('id', id)
+      .select('id');
 
     if (error) throw productSaveError(error);
+    if (!data || data.length === 0) {
+      throw Object.assign(new Error('Mahsulot o\'chirilmadi: u topilmadi yoki ruxsat yo\'q'), { code: 'product_not_deleted' });
+    }
   },
 
   // Toggle product visibility
