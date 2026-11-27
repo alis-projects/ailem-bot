@@ -294,21 +294,39 @@ export const formatVariantName = (variant) => {
 };
 
 /**
+ * The variant's OWN price: a positive number, or null when it has none
+ * (null, empty, 0, negative or not a number). The single rule for the
+ * storefront and the server (src/lib/orderPricing.js): a variant without its
+ * own price is sold at the product price.
+ * @param {Object} variant
+ * @returns {number|null}
+ */
+export const ownVariantPrice = (variant) => {
+  const raw = variant?.price;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/**
+ * Price a variant is sold at: its own price, else the product price
+ * @param {Object} variant
+ * @param {number} basePrice - product (selling) price
+ * @returns {number}
+ */
+export const effectiveVariantPrice = (variant, basePrice) => ownVariantPrice(variant) ?? basePrice;
+
+/**
  * Get price for a specific variant
- * Falls back to product base price if variant has no price
+ * Falls back to product base price if variant has no own price (null/empty/0)
  * @param {Array} variants - Array of variants
  * @param {string} color - Color
  * @param {string} size - Size
  * @param {number} basePrice - Base product price to fall back to
  * @returns {number} Variant price or base price
  */
-export const getVariantPrice = (variants = [], color, size, basePrice = 0) => {
-  const variant = findVariant(variants, color, size);
-  if (variant && variant.price !== null && variant.price !== undefined) {
-    return variant.price;
-  }
-  return basePrice;
-};
+export const getVariantPrice = (variants = [], color, size, basePrice = 0) =>
+  effectiveVariantPrice(findVariant(variants, color, size), basePrice);
 
 /**
  * Update price for a specific variant
@@ -392,7 +410,7 @@ export const getVariantPriceRange = (variants = [], basePrice = 0) => {
   }
 
   const prices = variants
-    .map(v => v.price !== null && v.price !== undefined ? v.price : basePrice)
+    .map(v => effectiveVariantPrice(v, basePrice))
     .filter(p => p > 0);
 
   if (prices.length === 0) {
@@ -413,13 +431,7 @@ export const getVariantPriceRange = (variants = [], basePrice = 0) => {
 export const hasVariantPricing = (variants = []) => {
   if (!variants || variants.length === 0) return false;
 
-  const prices = variants
-    .map(v => v.price)
-    .filter(p => p !== null && p !== undefined);
-
-  if (prices.length === 0) return false;
-
-  const uniquePrices = new Set(prices);
-  return uniquePrices.size > 1 || prices.length > 0;
+  // Only a positive own price counts (null / empty / 0 = the product price)
+  return variants.some(v => ownVariantPrice(v) !== null);
 };
 

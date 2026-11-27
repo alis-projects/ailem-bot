@@ -710,7 +710,10 @@ const ProductsSection = () => {
   };
 
   const handleVariantPriceChange = (color, size, newPrice) => {
-    const updatedVariants = updateVariantPrice(formData.variants, color, size, parseFloat(newPrice) || 0);
+    // A cleared field means «no own price» (null → the product price is used),
+    // not 0. Only a positive number is the variant's own price.
+    const n = parseFloat(newPrice);
+    const updatedVariants = updateVariantPrice(formData.variants, color, size, Number.isFinite(n) && n > 0 ? n : null);
     setFormData(prev => ({ ...prev, variants: updatedVariants }));
   };
 

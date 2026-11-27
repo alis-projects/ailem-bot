@@ -2,7 +2,7 @@ import { useState, useEffect, useContext, useRef } from 'react';
 import { t } from "../../utils/translation-fallback";
 import { Star, Minus, Plus, ShoppingCart, ChevronLeft, ChevronRight, Share2, Bell, BellOff, Truck, Shield } from 'lucide-react';
 import { formatPrice } from '../../utils/helpers';
-import { getVariantStock, getVariantPrice, getAvailableColors, getAvailableSizesForColor, getTotalVariantStock, findVariant, getVariantPriceRange, hasVariantPricing, pickSizeForColor } from '../../utils/variants';
+import { getVariantStock, getVariantPrice, getAvailableColors, getAvailableSizesForColor, getTotalVariantStock, findVariant, getVariantPriceRange, hasVariantPricing, pickSizeForColor, ownVariantPrice } from '../../utils/variants';
 import { UserContext } from '../../context/UserContext';
 import { stockNotificationsAPI } from '../../services/api';
 import DOMPurify from 'dompurify';
@@ -304,7 +304,8 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
 
   const handleAddToCart = () => {
     // Pass variant price if available
-    const variantPrice = currentVariant?.price || null;
+    // Own positive price or null (the cart then uses the product price, as the server does)
+    const variantPrice = ownVariantPrice(currentVariant);
 
     // Override product fields with variant's if available
     let productForCart = product;
@@ -583,7 +584,7 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
                   </span>
                 )}
                 {/* Show base price crossed out if variant has different price */}
-                {hasVarPricing && currentVariant?.price && currentVariant.price !== product.price && (
+                {ownVariantPrice(currentVariant) !== null && ownVariantPrice(currentVariant) !== Number(product.price) && (
                   <span className="text-sm text-gray-400">
                     (variant narxi)
                   </span>
