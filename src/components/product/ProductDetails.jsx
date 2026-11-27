@@ -2,7 +2,7 @@ import { useState, useEffect, useContext, useRef } from 'react';
 import { t } from "../../utils/translation-fallback";
 import { Star, Minus, Plus, ShoppingCart, ChevronLeft, ChevronRight, Share2, Bell, BellOff, Truck, Shield } from 'lucide-react';
 import { formatPrice } from '../../utils/helpers';
-import { getVariantStock, getVariantPrice, getAvailableColors, getAvailableSizesForColor, getTotalVariantStock, findVariant, getVariantPriceRange, hasVariantPricing } from '../../utils/variants';
+import { getVariantStock, getVariantPrice, getAvailableColors, getAvailableSizesForColor, getTotalVariantStock, findVariant, getVariantPriceRange, hasVariantPricing, pickSizeForColor } from '../../utils/variants';
 import { UserContext } from '../../context/UserContext';
 import { stockNotificationsAPI } from '../../services/api';
 import DOMPurify from 'dompurify';
@@ -15,6 +15,8 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [selectedColor, setSelectedColor] = useState(null);
   const [selectedSize, setSelectedSize] = useState(null);
+  // Shown when a colour change had to switch the size: { from, to, color }
+  const [sizeNote, setSizeNote] = useState(null);
   const [quantity, setQuantity] = useState(1);
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
@@ -107,6 +109,7 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
 
   // Reset selected color/size when product changes
   useEffect(() => {
+    setSizeNote(null);
     if (hasVariants) {
       const colors = getAvailableColors(product.variants);
       if (colors.length > 0) {
@@ -119,6 +122,21 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
       setSelectedSize(productSizes[0] || null);
     }
   }, [product.id]);
+
+  // Another colour: keep the size if this colour has it in stock, otherwise
+  // select a size of this colour that is in stock and say so
+  const handleColorSelect = (color) => {
+    setSelectedColor(color);
+    if (!hasVariants) return;
+    const { size, kept } = pickSizeForColor(product.variants, color, selectedSize);
+    setSizeNote(!kept && selectedSize && size && size !== selectedSize ? { from: selectedSize, to: size, color } : null);
+    setSelectedSize(size);
+  };
+
+  const handleSizeSelect = (size) => {
+    setSizeNote(null);
+    setSelectedSize(size);
+  };
 
   // Reset to first image when variant changes
   useEffect(() => {
@@ -646,7 +664,7 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
                 return (
                   <button
                     key={color}
-                    onClick={() => isAvailable && setSelectedColor(color)}
+                    onClick={() => isAvailable && handleColorSelect(color)}
                     disabled={!isAvailable}
                     className={`px-4 py-2 rounded-lg border-2 transition-all ${
                       selectedColor === color
@@ -670,13 +688,18 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
             <label className="block text-sm font-semibold text-gray-700 mb-2">
               {t('product.selectSize')}: {selectedSize}
             </label>
+            {sizeNote && (
+              <p role="status" className="text-xs text-gray-500 mb-2">
+                «{sizeNote.from}» {sizeNote.color} rangida yo'q — «{sizeNote.to}» tanlandi
+              </p>
+            )}
             <div className="flex gap-2 flex-wrap">
               {productSizes.map((size) => {
                 const isAvailable = !hasVariants || availableSizes.includes(size);
                 return (
                   <button
                     key={size}
-                    onClick={() => isAvailable && setSelectedSize(size)}
+                    onClick={() => isAvailable && handleSizeSelect(size)}
                     disabled={!isAvailable}
                     className={`px-4 py-2 rounded-lg border-2 transition-all ${
                       selectedSize === size

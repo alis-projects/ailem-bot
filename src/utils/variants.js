@@ -153,6 +153,36 @@ export const getTotalVariantStock = (variants = []) => {
 };
 
 /**
+ * Is the product available to buy at all? With variants: at least one
+ * variant has stock (the product's own `stock` is not used — the admin form
+ * leaves it at 0 for products with variants). Without variants: its stock.
+ * Same rule as the server (src/lib/orderPricing.js takes variant stock).
+ * @param {Object} product
+ * @returns {boolean}
+ */
+export const isProductAvailable = (product) => {
+  if (!product) return false;
+  if (Array.isArray(product.variants) && product.variants.length > 0) {
+    return product.variants.some(v => Number(v?.stock) > 0);
+  }
+  return Number(product.stock) > 0;
+};
+
+/**
+ * Size to select when the buyer picks another colour: keep the current size
+ * if the new colour has it in stock; otherwise the first size of the new
+ * colour that is in stock (null if none).
+ * @returns {{ size: string|null, kept: boolean }}
+ */
+export const pickSizeForColor = (variants = [], color, currentSize) => {
+  const available = getAvailableSizesForColor(variants, color);
+  const norm = (s) => String(s ?? '').toLowerCase().trim();
+  const same = currentSize ? available.find(s => norm(s) === norm(currentSize)) : null;
+  if (same) return { size: same, kept: true };
+  return { size: available[0] ?? null, kept: false };
+};
+
+/**
  * Get low stock variants (stock < threshold)
  * @param {Array} variants - Array of variants
  * @param {number} threshold - Stock threshold (default: 10)

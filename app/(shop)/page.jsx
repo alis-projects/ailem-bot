@@ -1,6 +1,6 @@
 import { getEssentialData, getAppSettings } from '../../src/lib/data';
 import HomePageClient from '../../src/components/pages/HomePageClient';
-import { getTotalVariantStock } from '../../src/utils/variants';
+import { isProductAvailable } from '../../src/utils/variants';
 
 export const metadata = {
   title: "Ailem — Uy tekstillari do'koni | ailem.uz",
@@ -19,11 +19,7 @@ export default async function HomePage() {
       getAppSettings(),
     ]);
 
-    ssrProducts = essentialData.products.filter((product) => {
-      const hasVariants = product.variants && product.variants.length > 0;
-      const stock = hasVariants ? getTotalVariantStock(product.variants) : (product.stock || 0);
-      return product.visible !== false && stock > 0;
-    });
+    ssrProducts = essentialData.products.filter((product) => product.visible !== false && isProductAvailable(product));
     ssrCategories = essentialData.categories.filter(c => c.visible !== false);
     ssrBanners = appSettings.banners || [];
     ssrSaleTimer = appSettings.sale_timer;

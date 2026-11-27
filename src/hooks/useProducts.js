@@ -1,7 +1,7 @@
 import { useContext, useState, useMemo, useEffect } from 'react';
 import { AdminContext } from '../context/AdminContext';
 import { loadFromLocalStorage, saveToLocalStorage } from '../utils/helpers';
-import { getTotalVariantStock } from '../utils/variants';
+import { isProductAvailable } from '../utils/variants';
 import { t } from '../utils/translation-fallback';
 
 // Module-level lock: persists across all hook instances and re-mounts
@@ -40,11 +40,6 @@ export const useProducts = () => {
   const filteredProducts = useMemo(() => {
     let filtered = [...products];
 
-    // Helper function to get stock for a product (considering variants)
-    const getProductStock = (product) => {
-      const hasVariants = product.variants && product.variants.length > 0;
-      return hasVariants ? getTotalVariantStock(product.variants) : (product.stock || 0);
-    };
 
     // Filter out hidden products (only show visible products to customers)
     filtered = filtered.filter(product => product.visible !== false);
@@ -127,16 +122,16 @@ export const useProducts = () => {
 
     // Always move out-of-stock products to the end while preserving sort order
     filtered.sort((a, b) => {
-      const aStock = getProductStock(a);
-      const bStock = getProductStock(b);
+      const aIn = isProductAvailable(a);
+      const bIn = isProductAvailable(b);
 
       // If both in stock or both out of stock, maintain current order
-      if ((aStock > 0 && bStock > 0) || (aStock === 0 && bStock === 0)) {
+      if (aIn === bIn) {
         return 0;
       }
 
       // Move out-of-stock to end
-      return aStock === 0 ? 1 : -1;
+      return aIn ? -1 : 1;
     });
 
     return filtered;
@@ -155,11 +150,6 @@ export const useProducts = () => {
       return featuredProductsCache;
     }
 
-    // Helper to get stock
-    const getProductStock = (product) => {
-      const hasVariants = product.variants && product.variants.length > 0;
-      return hasVariants ? getTotalVariantStock(product.variants) : (product.stock || 0);
-    };
 
     // Only count completed/delivered orders (exclude cancelled)
     const validOrders = (orders || []).filter(order =>
@@ -182,7 +172,7 @@ export const useProducts = () => {
     // Sort products by sales count
     const productsWithSales = products
       .filter(product => product.visible !== false) // Only visible products
-      .filter(product => getProductStock(product) > 0) // Only in-stock products
+      .filter(product => isProductAvailable(product)) // Only in-stock products
       .map(product => ({
         ...product,
         totalSold: salesCount[product.id] || 0
@@ -197,7 +187,7 @@ export const useProducts = () => {
     // Fallback: if no sales data, show products with BEST SELLER badge or newest products
     if (topSellers.length === 0) {
       const badgedProducts = products
-        .filter(p => p.visible !== false && p.badge === 'BEST SELLER' && getProductStock(p) > 0)
+        .filter(p => p.visible !== false && p.badge === 'BEST SELLER' && isProductAvailable(p))
         .slice(0, 6);
 
       if (badgedProducts.length > 0) {
@@ -205,7 +195,7 @@ export const useProducts = () => {
       } else {
         // Last fallback: show newest in-stock products
         result = products
-          .filter(p => p.visible !== false && getProductStock(p) > 0)
+          .filter(p => p.visible !== false && isProductAvailable(p))
           .slice(0, 6);
       }
     } else {
