@@ -597,6 +597,31 @@ describe('the product is saved but its audit entry is not', () => {
   });
 });
 
+describe('variant price in the admin form', () => {
+  const withVariants = (price) => dbRow({ stock: 0, colors: ['Oq', 'Qora'], sizes: ['Katta'], variants: [
+    { variant_id: 'va', color: 'Oq', size: 'Katta', stock: 3, price, barcode: '1', volume_pricing: null },
+    { variant_id: 'vb', color: 'Qora', size: 'Katta', stock: 3, price: null, barcode: '2', volume_pricing: null }
+  ] });
+  // the «Narxi:» input of the Oq / Katta variant (placeholder = product price)
+  const variantPriceInput = () => screen.getAllByPlaceholderText('100000').find(el => el.closest('.flex-col'));
+
+  test.each([
+    ['cleared', 120000, '', null],
+    ['0 typed', 120000, '0', null],
+    ['own price typed', null, '120000', 120000]
+  ])('%s: stored variant price is %j → %j', async (_, from, typed, stored) => {
+    m.db.products = new Map([['p1', withVariants(from)]]);
+    const ctx = await openEdit();
+    expect(variantPriceInput().value).toBe(from ? String(from) : '');
+    set(variantPriceInput(), typed);
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    const v = m.db.products.get('p1').variants;
+    expect(v[0]).toMatchObject({ variant_id: 'va', price: stored, stock: 3, barcode: '1' });
+    expect(v[1]).toMatchObject({ variant_id: 'vb', price: null });
+  });
+});
+
 describe('productForm helpers', () => {
   test('stockError', () => {
     expect(stockError('0')).toBeNull();

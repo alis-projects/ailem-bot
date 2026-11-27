@@ -26,6 +26,7 @@
 //                CreateTransaction reserves stock under row locks
 //                (supabase-migrations/add-stock-reservation.sql).
 import { calculateItemTotalWithTierGrouping, getEffectivePriceWithTierGrouping } from '../utils/volumePricing';
+import { ownVariantPrice } from '../utils/variants';
 
 export const SELF_PICKUP_COURIER = "O'zi olib ketish";
 export const MAX_LINES = 50;
@@ -106,7 +107,8 @@ export function priceOrder({ lines, products, shippingRates = [], bonusConfig = 
       variant = findLiveVariant(product, line.color, line.size);
       if (!variant) throw new PricingError('VARIANT_UNAVAILABLE', 'Tanlangan variant mavjud emas', { index, productId: product.id });
     }
-    const variantPrice = variant && positive(num(variant.price)) ? num(variant.price) : null;
+    // Same rule as the product page (utils/variants.js): own price only when > 0
+    const variantPrice = variant ? ownVariantPrice(variant) : null;
     const unitBase = variantPrice ?? productPrice;
     const volumePricing = variant?.volume_pricing?.length > 0 ? variant.volume_pricing : (product.volume_pricing?.length > 0 ? product.volume_pricing : null);
     const weight = num(variant?.weight) > 0 ? num(variant.weight) : (num(product.weight) > 0 ? num(product.weight) : DEFAULT_WEIGHT_KG);
