@@ -16,7 +16,7 @@ import { productsAPI, ordersAPI, storageAPI, uzumClicksAPI } from '../../../serv
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
-import { emptyProductForm, productToForm, productImages, stockError, tiersError, normalizeTiers, formSnapshot } from '../../../utils/productForm';
+import { emptyProductForm, productToForm, productImages, stockError, tiersError, normalizeTiers, formSnapshot, hasOwnTiers } from '../../../utils/productForm';
 
 // Configure marked for proper line breaks
 marked.setOptions({
@@ -177,21 +177,23 @@ const ProductsSection = () => {
       }
     }
 
-    // Bulk prices: valid ranges, no overlaps, 0 < price ≤ the regular price of
-    // the product, or of the variant when it has its own price
+    // Bulk prices: valid ranges, no overlaps, 0 < price ≤ the regular price.
+    // As at checkout (src/lib/orderPricing.js): a variant with its own tiers
+    // uses them; a variant without inherits the product's shared tiers. Its
+    // regular price is its own price when > 0, else the product's.
     const productPrice = parseFloat(formData.salePrice || formData.price);
+    const problems = [];
+    const shared = tiersError(formData.volume_pricing, productPrice);
+    if (shared) problems.push(shared);
     if (hasVariants) {
       for (const v of formData.variants) {
-        const problem = tiersError(v.volume_pricing, Number(v.price) > 0 ? Number(v.price) : productPrice);
-        if (problem) {
-          errors.volumePricing = `${v.color} / ${v.size}: ${problem}`;
-          break;
-        }
+        const base = Number(v.price) > 0 ? Number(v.price) : productPrice;
+        const own = hasOwnTiers(v);
+        const problem = own ? tiersError(v.volume_pricing, base) : (shared ? null : tiersError(formData.volume_pricing, base));
+        if (problem) problems.push(`${v.color} / ${v.size}${own ? '' : ' (umumiy narxlar)'}: ${problem}`);
       }
-    } else {
-      const problem = tiersError(formData.volume_pricing, productPrice);
-      if (problem) errors.volumePricing = problem;
     }
+    if (problems.length) errors.volumePricing = problems[0];
 
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
@@ -319,8 +321,9 @@ const ProductsSection = () => {
         tags: formData.tags ? formData.tags.split(',').map(t => t.trim().toLowerCase()).filter(t => t) : [],
         // Bulk-price tiers are stored as numbers, sorted by min_qty
         variants: (formData.variants || []).map(v => (v.volume_pricing ? { ...v, volume_pricing: normalizeTiers(v.volume_pricing) } : v)),
-        // Clear product-level volume_pricing when variants exist (per-variant pricing takes over)
-        volume_pricing: formData.variants?.length > 0 ? null : normalizeTiers(formData.volume_pricing),
+        // Shared tiers are kept for products with variants too: variants
+        // without their own tiers use them at checkout
+        volume_pricing: normalizeTiers(formData.volume_pricing),
         barcode: formData.barcode || null,
         uzumUrl: formData.uzumUrl || null,
         aPlusContent: formData.aPlusContent || null
@@ -1217,7 +1220,7 @@ const ProductsSection = () => {
                                   ? { background: 'var(--ok-weak)', color: 'var(--ok)' }
                                   : { background: 'var(--surface-2)', color: 'var(--text-2)' }}
                               >
-                                💰 Hajm narxi {tiers.length > 0 && `(${tiers.length})`}
+                                💰 Hajm narxi {tiers.length > 0 ? `(${tiers.length})` : (formData.volume_pricing?.length > 0 ? '(umumiy)' : '')}
                                 <ChevronRight className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                               </button>
 
@@ -1453,13 +1456,13 @@ const ProductsSection = () => {
 
             </div>
 
-            {/* Volume Pricing Section - only for products WITHOUT variants */}
-            {formData.variants.length === 0 && (
+            {/* Volume Pricing Section. With variants these are the shared tiers:
+                a variant without its own «Hajm narxi» uses them */}
             <div className="md:col-span-2 pt-6" style={{ borderTop: '1px solid var(--border)' }}>
               <div className="rounded-lg p-4" style={{ background: 'var(--ok-weak)', border: '1px solid var(--ok)' }}>
                 <div className="flex items-center justify-between mb-3">
                   <label className="text-sm" style={{ fontWeight: 700, color: 'var(--ok)' }}>
-                    Hajmli narxlash (Volume Discounts)
+                    {formData.variants.length > 0 ? 'Umumiy hajmli narxlash (variantlar uchun)' : 'Hajmli narxlash (Volume Discounts)'}
                   </label>
                   <button
                     type="button"
@@ -1485,7 +1488,9 @@ const ProductsSection = () => {
                 </div>
 
                 <p className="text-xs mb-4" style={{ color: 'var(--ok)' }}>
-                  Ko'p miqdorda xarid qilgan xaridorlar uchun maxsus narxlarni belgilang
+                  {formData.variants.length > 0
+                    ? 'O\'z hajm narxi bo\'lmagan variantlar shu narxlardan foydalanadi. O\'z hajm narxi bor variantlar o\'zinikidan foydalanadi.'
+                    : 'Ko\'p miqdorda xarid qilgan xaridorlar uchun maxsus narxlarni belgilang'}
                 </p>
 
                 {formData.volume_pricing && formData.volume_pricing.length > 0 ? (
@@ -1581,7 +1586,6 @@ const ProductsSection = () => {
                 )}
               </div>
             </div>
-            )}
 
             {/* A+ Content Section */}
             <div className="md:col-span-2">
