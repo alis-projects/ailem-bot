@@ -523,6 +523,45 @@ describe('shared bulk prices of a product with variants', () => {
   });
 });
 
+describe('what the form hands to the audit log', () => {
+  test('opening a card and cancelling, or closing it, changes nothing', async () => {
+    const ctx = await openEdit();
+    set(nameInput(), 'Choyshab tahrir');
+    await click(button('Bekor qilish'));
+    expect(ctx.updateProduct).not.toHaveBeenCalled();
+    expect(ctx.addProduct).not.toHaveBeenCalled();
+    expect(ctx.deleteProduct).not.toHaveBeenCalled();
+  });
+
+  test('an edit passes the full record it started from as «before»', async () => {
+    const ctx = await openEdit();
+    set(stockInput(), '6');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    const options = ctx.updateProduct.mock.calls[0][2];
+    expect(options.before).toMatchObject({ id: 'p1', description: DESC, images: [IMG1, IMG2], a_plus_content: APLUS, stock: 5 });
+  });
+
+  test('«Nusxa» passes the source product, a new product does not', async () => {
+    const ctx = renderSection();
+    await click(rowButton('Choyshab', 'Nusxalash'));
+    await click(button("Qo'shish"));
+    await waitFor(() => expect(ctx.addProduct).toHaveBeenCalledTimes(1));
+    expect(ctx.addProduct.mock.calls[0][1]).toEqual({ copyOf: { id: 'p1', name: 'Choyshab' } });
+
+    await click(button("Mahsulot qo'shish"));
+    set(nameInput(), 'Yangi sochiq');
+    set(input('Narxi (UZS) *'), '50000');
+    set(screen.getByText('Kategoriya *').parentElement.querySelector('select'), 'Choyshablar');
+    set(screen.getByPlaceholderText('choyshablar, paxta, hashamatli, yumshoq (vergul bilan ajratilgan)'), 'sochiq');
+    set(stockInput(), '1');
+    await addImageUrl(IMG1);
+    await click(button("Qo'shish"));
+    await waitFor(() => expect(ctx.addProduct).toHaveBeenCalledTimes(2));
+    expect(ctx.addProduct.mock.calls[1][1]).toEqual({ copyOf: null });
+  });
+});
+
 describe('productForm helpers', () => {
   test('stockError', () => {
     expect(stockError('0')).toBeNull();

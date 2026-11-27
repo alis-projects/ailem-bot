@@ -11,6 +11,9 @@ export const AUDIT_ACTIONS = {
   PRODUCT_CREATE: 'product.create',
   PRODUCT_UPDATE: 'product.update',
   PRODUCT_DELETE: 'product.delete',
+  PRODUCT_COPY: 'product.copy',
+  PRODUCT_HIDE: 'product.hide',
+  PRODUCT_PUBLISH: 'product.publish',
 
   // Order actions
   ORDER_APPROVE: 'order.approve',
@@ -175,6 +178,9 @@ export const formatAuditAction = (action) => {
     [AUDIT_ACTIONS.PRODUCT_CREATE]: 'Created product',
     [AUDIT_ACTIONS.PRODUCT_UPDATE]: 'Updated product',
     [AUDIT_ACTIONS.PRODUCT_DELETE]: 'Deleted product',
+    [AUDIT_ACTIONS.PRODUCT_COPY]: 'Copied product',
+    [AUDIT_ACTIONS.PRODUCT_HIDE]: 'Hid product',
+    [AUDIT_ACTIONS.PRODUCT_PUBLISH]: 'Published product',
     [AUDIT_ACTIONS.ORDER_APPROVE]: 'Approved order',
     [AUDIT_ACTIONS.ORDER_REJECT]: 'Rejected order',
     [AUDIT_ACTIONS.ORDER_SHIP]: 'Marked order as shipped',

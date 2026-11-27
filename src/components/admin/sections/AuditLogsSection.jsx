@@ -64,13 +64,24 @@ const AuditLogsSection = () => {
   };
 
   const getActionColor = (action) => {
-    if (action.includes('create')) return 'a-pill-ok';
+    if (action.includes('create') || action.includes('copy') || action.includes('publish')) return 'a-pill-ok';
+    if (action.includes('hide')) return 'a-pill-danger';
     if (action.includes('delete')) return 'a-pill-danger';
     if (action.includes('update') || action.includes('toggle')) return 'a-pill-info';
     if (action.includes('approve') || action.includes('deliver')) return 'a-pill-ok';
     if (action.includes('reject')) return 'a-pill-danger';
     if (action.includes('ship')) return 'a-pill-info';
     return 'a-pill-info';
+  };
+
+  // Name of the changed object, when the entry carries it (products do)
+  const entryName = (log) => {
+    try {
+      const meta = typeof log.metadata === 'string' ? JSON.parse(log.metadata) : log.metadata;
+      return meta?.name || null;
+    } catch {
+      return null;
+    }
   };
 
   const entityTypes = [...new Set(Object.values(AUDIT_ACTIONS).map(a => a.split('.')[0]))];
@@ -213,6 +224,7 @@ const AuditLogsSection = () => {
                       <td className="text-sm">
                         <span style={{ fontWeight: 500, color: 'var(--text)' }}>{log.entity_type}</span>
                         <span className="a-faint ml-1">#{log.entity_id?.slice(0, 8)}</span>
+                        {entryName(log) && <div className="a-muted" style={{ fontSize: 12 }}>{entryName(log)}</div>}
                       </td>
                       <td className="text-sm a-muted">
                         {log.admin_email}

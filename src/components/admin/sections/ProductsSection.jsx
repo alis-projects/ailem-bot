@@ -36,6 +36,8 @@ const ProductsSection = () => {
   const [formData, setFormData] = useState(emptyProductForm);
   // Form state + images as the form was opened; differs → unsaved changes
   const baselineRef = useRef(null);
+  // The product a «Nusxa» form was copied from ({ id, name }), for the audit log
+  const copySourceRef = useRef(null);
 
   // Other local state
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -353,7 +355,7 @@ const ProductsSection = () => {
         }
 
         // expectedUpdatedAt: refuse if the product changed since the form loaded it
-        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at });
+        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at, before: editingProduct });
 
         if (stockIncreased || variantsToNotify.length > 0) {
           const productWithId = { ...productData, id: editingProduct.id };
@@ -371,7 +373,7 @@ const ProductsSection = () => {
           })();
         }
       } else {
-        await addProduct(productData);
+        await addProduct(productData, { copyOf: copySourceRef.current });
       }
 
       toast.success(editingProduct ? 'Mahsulot yangilandi' : 'Mahsulot qo\'shildi');
@@ -404,6 +406,7 @@ const ProductsSection = () => {
     setFormErrors({});
     setAllImages([]);
     baselineRef.current = null;
+    copySourceRef.current = null;
     setShowForm(true);
     try {
       const full = await productsAPI.getById(product.id);
@@ -427,6 +430,7 @@ const ProductsSection = () => {
     setFormErrors({});
     setFullRecord({ status: 'idle', error: null });
     baselineRef.current = null;
+    copySourceRef.current = null;
   };
 
   const isFormDirty = () => showForm && baselineRef.current !== null &&
@@ -569,6 +573,7 @@ const ProductsSection = () => {
     const form = productToForm(full, { copy: true });
     const images = productImages(full);
     setEditingProduct(null); // Not editing, creating new
+    copySourceRef.current = { id: full.id, name: full.name };
     setFullRecord({ status: 'idle', error: null });
     setFormErrors({});
     setAllImages(images);
