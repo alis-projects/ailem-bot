@@ -12,7 +12,7 @@ import {
   calculateItemTotalWithTierGrouping,
   getTierGroupInfo
 } from '../../utils/volumePricing';
-import { findCartVariant } from '../../utils/variants';
+import { liveCartLine } from '../../utils/cartPricing';
 import { AdminContext } from '../../context/AdminContext';
 
 const CartPage = ({ onNavigate }) => {
@@ -33,28 +33,20 @@ const CartPage = ({ onNavigate }) => {
     }
   }, [onNavigate, addToCart]);
 
-  // Filter out hidden products and resolve live volume_pricing from product data
-  // Cart stores snapshots — volume_pricing may be stale if admin changed it
+  // Filter out hidden products; price, bulk tiers and weight come from the
+  // LIVE catalog (the cart stores what a line was added at, which may be old).
+  // The variant is found by its permanent id; old lines by colour + size.
   const visibleCartItems = useMemo(() => {
     if (!products.length) return cartItems;
     return getVisibleCartItems(cartItems, products)
       .map(item => {
         const liveProduct = products.find(p => p.id === item.id);
         if (!liveProduct) return item;
-
-        // Resolve live volume_pricing: variant-level first, then product-level.
-        // The variant is found by its permanent id (renames do not matter);
-        // old lines without one by colour + size.
-        let liveVolumePricing = liveProduct.volume_pricing;
-        const liveVariant = liveProduct.variants?.length > 0 ? findCartVariant(liveProduct.variants, item) : null;
-        if (liveVariant?.volume_pricing?.length > 0) {
-          liveVolumePricing = liveVariant.volume_pricing;
-        }
+        const line = liveCartLine(item, liveProduct);
+        const liveVariant = line.liveVariant;
 
         return {
-          ...item,
-          volume_pricing: liveVolumePricing,
-          liveVariant,
+          ...line,
           liveStock: liveVariant ? (Number(liveVariant.stock) || 0) : (Number(liveProduct.stock) || 0),
           // show the variant's current name (it may have been renamed)
           selectedColor: liveVariant?.color || item.selectedColor,
@@ -170,6 +162,11 @@ const CartPage = ({ onNavigate }) => {
                     <p className="text-lg font-bold text-primary">
                       {formatPrice(item.price)}
                     </p>
+                    {item.priceChanged && (
+                      <p className="text-xs text-gray-500" role="note">
+                        Narx o'zgardi: savatga {formatPrice(item.cartPrice)} da qo'shilgan
+                      </p>
+                    )}
                     {item.volume_pricing && item.volume_pricing.length > 0 && (
                       <p className="text-xs text-green-600 font-medium">
                         💰 Hajm bo'yicha chegirma mavjud

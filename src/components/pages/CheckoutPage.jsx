@@ -8,7 +8,7 @@ import { PickupPointsContext } from '../../context/PickupPointsContext';
 import { ShippingRatesContext } from '../../context/ShippingRatesContext';
 import { formatPrice, bonusPointsToDollars, calculateMaxBonusUsage } from '../../utils/helpers';
 import { calculateItemTotalWithTierGrouping } from '../../utils/volumePricing';
-import { findCartVariant } from '../../utils/variants';
+import { liveCartLines } from '../../utils/cartPricing';
 import { useBackButton } from '../../hooks/useBackButton';
 import CustomDropdown from '../common/CustomDropdown';
 import { usersAPI } from '../../services/api';
@@ -162,26 +162,9 @@ const CheckoutPage = ({ onNavigate }) => {
     }
   }, [pickupCourier, pickupState, pickupCity, getPickupPointsByCourierStateCity]);
 
-  // Resolve live volume_pricing from product data (cart snapshots may be stale)
-  const liveCartItems = useMemo(() => {
-    if (!products.length) return cartItems;
-    return cartItems.map(item => {
-      const liveProduct = products.find(p => p.id === item.id);
-      if (!liveProduct) return item;
-      let liveVolumePricing = liveProduct.volume_pricing;
-      let liveWeight = liveProduct.weight;
-      if ((item.variantId || (item.selectedColor && item.selectedSize)) && liveProduct.variants?.length > 0) {
-        const liveVariant = findCartVariant(liveProduct.variants, item);
-        if (liveVariant?.volume_pricing?.length > 0) {
-          liveVolumePricing = liveVariant.volume_pricing;
-        }
-        if (liveVariant?.weight) {
-          liveWeight = liveVariant.weight;
-        }
-      }
-      return { ...item, volume_pricing: liveVolumePricing, weight: liveWeight };
-    });
-  }, [cartItems, products]);
+  // Price, bulk tiers and weight from the live catalog (cart lines keep what
+  // they were added at, which may be old) — the same rules as the server
+  const liveCartItems = useMemo(() => liveCartLines(cartItems, products), [cartItems, products]);
 
   const subtotal = liveCartItems.reduce((total, item) => {
     return total + calculateItemTotalWithTierGrouping(item, liveCartItems);

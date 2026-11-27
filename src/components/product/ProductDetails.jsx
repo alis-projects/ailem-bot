@@ -8,6 +8,7 @@ import { stockNotificationsAPI } from '../../services/api';
 import DOMPurify from 'dompurify';
 import { useToast } from '../../context/ToastContext';
 import APlusContent from './APlusContent';
+import { productPageTotal } from '../../utils/cartPricing';
 
 const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
   const { user } = useContext(UserContext);
@@ -389,7 +390,9 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
     }
   };
 
-  const totalPrice = currentPrice * quantity;
+  // «Savatga qo'shish» total: selected quantity × unit price after the bulk
+  // tier that applies (the variant's own tiers, else the product's)
+  const { unitPrice: buttonUnitPrice, total: totalPrice, bulk: buttonBulk } = productPageTotal(product, currentVariant, quantity);
 
   // Calculate actual approved reviews count
   const approvedReviewsCount = product.reviews?.filter(r => r.approved).length || 0;
@@ -788,6 +791,11 @@ const ProductDetails = ({ product, onAddToCart, onNavigate }) => {
             <ShoppingCart className="w-5 h-5" />
             {`${t('product.addToCart')} - ${formatPrice(totalPrice)}`}
           </button>
+        )}
+        {buttonBulk && currentStock > 0 && (
+          <p className="text-xs text-green-700 -mt-2 mb-3 text-center">
+            Ulgurji narx: {quantity} dona × {formatPrice(buttonUnitPrice)}
+          </p>
         )}
 
         {/* Trust Badges */}
