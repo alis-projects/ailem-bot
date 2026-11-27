@@ -1,3 +1,4 @@
+import { baseSku, uniqueSku } from './variantSku';
 // Editing a product's colour/size lists WITHOUT losing variant data
 // (audit 2026-11-25 #12).
 //
@@ -75,7 +76,6 @@ export function diffAxis(oldList, newList) {
   };
 }
 
-const skuFor = (color, size) => `${String(color).substring(0, 3).toUpperCase()}-${String(size).substring(0, 1).toUpperCase()}`;
 
 // Permanent id of a new variant (the database also fills in / fixes ids:
 // supabase-migrations/add-variant-ids.sql)
@@ -88,9 +88,11 @@ export const newVariantId = () => {
   });
 };
 
-const emptyVariant = (color, size) => ({
+// SKU unique within the product: «KUL-5», then «KUL-5-2» for «Kulrang ko'k / 50x90»
+const emptyVariant = (color, size, takenSkus = []) => ({
   variant_id: newVariantId(),
-  color, size, stock: 0, price: null, image: null, weight: null, volume_pricing: null, sku: skuFor(color, size)
+  color, size, stock: 0, price: null, image: null, weight: null, volume_pricing: null,
+  sku: uniqueSku(baseSku(color, size), takenSkus)
 });
 
 /**
@@ -116,7 +118,7 @@ export function applyAxisChange(variants, axis, change, otherValues = []) {
         for (const o of otherValues) {
           const color = axis === 'color' ? value : o;
           const size = axis === 'color' ? o : value;
-          if (!has(color, size)) out.push(emptyVariant(color, size));
+          if (!has(color, size)) out.push(emptyVariant(color, size, out.map(v => v.sku)));
         }
       }
       return out;

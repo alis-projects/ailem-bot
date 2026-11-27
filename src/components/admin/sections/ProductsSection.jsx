@@ -16,6 +16,7 @@ import { productsAPI, ordersAPI, storageAPI, uzumClicksAPI } from '../../../serv
 import { exportProducts } from '../../../utils/csvExport';
 import { notifyProductBackInStock } from '../../../services/stockNotifications';
 import APlusEditor from '../shared/APlusEditor';
+import { newDuplicateSkus, duplicateSkuMessage, normalizeSku } from '../../../utils/variantSku';
 import { emptyProductForm, productToForm, productImages, stockError, tiersError, normalizeTiers, formSnapshot, hasOwnTiers } from '../../../utils/productForm';
 
 // Configure marked for proper line breaks
@@ -177,6 +178,9 @@ const ProductsSection = () => {
       if (variantKeys.length !== uniqueKeys.size) {
         errors.variants = 'Takroriy variantlar mavjud';
       }
+      // SKU must be unique within the product (the database refuses it too)
+      const skuDups = newDuplicateSkus(formData.variants, editingProduct?.variants || []);
+      if (skuDups.length > 0) errors.sku = duplicateSkuMessage(skuDups);
     }
 
     // Bulk prices: valid ranges, no overlaps, 0 < price ≤ the regular price.
@@ -386,7 +390,7 @@ const ProductsSection = () => {
       return true;
     } catch (error) {
       console.error('❌ Failed to save product:', error);
-      if (error?.code === 'reserved_variant_changed' || error?.code === 'product_stale') {
+      if (error?.code === 'reserved_variant_changed' || error?.code === 'product_stale' || error?.code === 'duplicate_variant_sku') {
         // Shown in the form next to the save button; the form keeps the edits
         setFormErrors(prev => ({ ...prev, save: error.message }));
         toast.error(error.message);
@@ -715,6 +719,16 @@ const ProductsSection = () => {
     const n = parseFloat(newPrice);
     const updatedVariants = updateVariantPrice(formData.variants, color, size, Number.isFinite(n) && n > 0 ? n : null);
     setFormData(prev => ({ ...prev, variants: updatedVariants }));
+  };
+
+  const handleVariantSkuChange = (color, size, sku) => {
+    setFormData(prev => ({
+      ...prev,
+      variants: prev.variants.map(v => (v.color?.toLowerCase() === color.toLowerCase() && v.size?.toLowerCase() === size.toLowerCase()
+        ? { ...v, sku: sku.toUpperCase() }
+        : v))
+    }));
+    if (formErrors.sku) setFormErrors(prev => ({ ...prev, sku: null }));
   };
 
   const handleVariantBarcodeChange = (color, size, barcode) => {
@@ -1178,6 +1192,18 @@ const ProductsSection = () => {
                             <span className="a-faint text-xs">dona</span>
                           </div>
                           <div className="flex items-center gap-2">
+                            <span className="a-muted text-xs w-12">SKU:</span>
+                            <input
+                              type="text"
+                              aria-label={`SKU: ${variant.color} / ${variant.size}`}
+                              value={variant.sku || ''}
+                              onChange={(e) => handleVariantSkuChange(variant.color, variant.size, e.target.value)}
+                              className="a-input text-sm font-mono"
+                              style={{ width: 112, padding: '4px 8px', ...(formErrors.sku && newDuplicateSkus(formData.variants, editingProduct?.variants || []).some(d => d.sku === normalizeSku(variant.sku)) ? { borderColor: 'var(--danger)' } : {}) }}
+                              placeholder="SKU"
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
                             <span className="a-muted text-xs w-12">Shtrix:</span>
                             <input
                               type="text"
@@ -1609,6 +1635,12 @@ const ProductsSection = () => {
               </div>
             </div>
 
+            {formErrors.sku && (
+              <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+                {formErrors.sku}
+              </div>
+            )}
+
             {formErrors.volumePricing && (
               <div role="alert" className="md:col-span-2 rounded-lg p-3 text-sm" style={{ background: 'var(--danger-weak, #fef2f2)', border: '1px solid var(--danger)', color: 'var(--danger)' }}>
                 Hajmli narxlash: {formErrors.volumePricing}
@@ -1770,17 +1802,10 @@ const ProductsSection = () => {
                     })()}
                   </td>
                   <td>
-                    {(() => {
-                      const displayStock = product.variants && product.variants.length > 0
-                        ? getTotalVariantStock(product.variants)
-                        : (product.stock || 0);
-
-                      return (
-                        <span className={`a-pill ${displayStock > 0 ? 'a-pill-ok' : 'a-pill-danger'}`}>
-                          {displayStock > 0 ? 'Mavjud' : 'Tugagan'}
-                        </span>
-                      );
-                    })()}
+                    {/* «Holat»: is the product shown to customers (stock is in «Ombor») */}
+                    <span className={`a-pill ${product.visible === false ? 'a-pill-danger' : 'a-pill-ok'}`}>
+                      {product.visible === false ? 'Yashirin' : 'Ko‘rinadi'}
+                    </span>
                   </td>
                   <td className="text-sm">
                     {product.uzumUrl ? (

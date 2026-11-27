@@ -1,3 +1,4 @@
+import { baseSku, uniqueSku } from './variantSku';
 /**
  * Variant Inventory Management Utilities
  * Handles stock tracking for color+size combinations
@@ -23,7 +24,8 @@ export const generateVariants = (colors = [], sizes = [], defaultStock = 0) => {
         color: color.trim(),
         size: size.trim(),
         stock: defaultStock,
-        sku: generateSKU(color, size),
+        // unique within the product (KUL-5, KUL-5-2, …)
+        sku: uniqueSku(generateSKU(color, size), variants.map(v => v.sku)),
         image: null // Optional: URL to variant-specific image
       });
     });
@@ -38,11 +40,7 @@ export const generateVariants = (colors = [], sizes = [], defaultStock = 0) => {
  * @param {string} size - Size name
  * @returns {string} SKU string
  */
-export const generateSKU = (color, size) => {
-  const colorCode = color.substring(0, 3).toUpperCase();
-  const sizeCode = size.substring(0, 1).toUpperCase();
-  return `${colorCode}-${sizeCode}`;
-};
+export const generateSKU = (color, size) => baseSku(color, size);
 
 /**
  * Find a specific variant by color and size
