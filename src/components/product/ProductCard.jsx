@@ -2,7 +2,7 @@ import { Star, Heart, ShoppingCart, ExternalLink } from 'lucide-react';
 import { t } from "../../utils/translation-fallback";
 import { formatPrice, calculateDiscountPercentage, getColorHex } from '../../utils/helpers';
 import { uzumClicksAPI } from '../../services/api';
-import { getTotalVariantStock } from '../../utils/variants';
+import { isProductAvailable } from '../../utils/variants';
 import { memo, useRef, useState, useEffect } from 'react';
 
 const ProductCard = memo(({ product, onView, isFavorite, onToggleFavorite, onQuickAddToCart }) => {
@@ -22,12 +22,8 @@ const ProductCard = memo(({ product, onView, isFavorite, onToggleFavorite, onQui
 
   const averageRating = calculateAverageRating();
 
-  // Check if product is out of stock (considering variants)
-  const hasVariants = product.variants && product.variants.length > 0;
-  const currentStock = hasVariants
-    ? getTotalVariantStock(product.variants)
-    : (product.stock || 0);
-  const isOutOfStock = currentStock === 0;
+  // Out of stock: no variant (or, without variants, the product) has stock
+  const isOutOfStock = !isProductAvailable(product);
 
   // Lazy load image via IntersectionObserver (background-image doesn't support loading="lazy")
   const imgRef = useRef(null);

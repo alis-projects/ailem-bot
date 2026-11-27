@@ -1,3 +1,4 @@
+import { isProductAvailable } from './variants';
 /**
  * Product Recommendation Engine
  * Provides related/similar product suggestions based on various strategies
@@ -57,7 +58,7 @@ export const getRelatedProducts = (currentProduct, allProducts, limit = 6) => {
   const candidates = allProducts.filter(product =>
     product.id !== currentProduct.id &&
     product.visible !== false &&
-    product.stock > 0
+    isProductAvailable(product)
   );
   
   // Calculate similarity scores
@@ -97,7 +98,7 @@ export const getSameCategoryProducts = (currentProduct, allProducts, limit = 6) 
       product.id !== currentProduct.id &&
       product.visible !== false &&
       product.category === currentProduct.category &&
-      product.stock > 0
+      isProductAvailable(product)
     )
     .sort((a, b) => (b.rating || 0) - (a.rating || 0))
     .slice(0, limit);
@@ -119,7 +120,7 @@ export const getSimilarTagProducts = (currentProduct, allProducts, limit = 6) =>
   
   return allProducts
     .filter(product => {
-      if (product.id === currentProduct.id || product.visible === false || product.stock <= 0) {
+      if (product.id === currentProduct.id || product.visible === false || !isProductAvailable(product)) {
         return false;
       }
       if (!product.tags || product.tags.length === 0) {
@@ -167,7 +168,7 @@ export const getSimilarPriceProducts = (currentProduct, allProducts, priceVarian
       product.visible !== false &&
       product.price >= minPrice &&
       product.price <= maxPrice &&
-      product.stock > 0
+      isProductAvailable(product)
     )
     .sort((a, b) => {
       const aPriceDiff = Math.abs(a.price - currentProduct.price);
@@ -197,7 +198,7 @@ export const getBestSellerProducts = (allProducts, currentProduct, limit = 6) =>
     .filter(product =>
       product.id !== currentProduct?.id &&
       product.visible !== false &&
-      product.stock > 0
+      isProductAvailable(product)
     )
     .sort((a, b) => {
       // Sort by rating and review count
@@ -297,7 +298,7 @@ export const getFrequentlyBoughtTogether = (currentProduct, allProducts, orders 
   
   const recommendations = sortedProductIds
     .map(id => allProducts.find(p => p.id === id))
-    .filter(p => p && p.visible !== false && p.stock > 0)
+    .filter(p => p && p.visible !== false && isProductAvailable(p))
     .slice(0, limit);
   
   // Fill with related products if not enough
