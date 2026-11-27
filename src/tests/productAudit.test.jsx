@@ -187,6 +187,44 @@ describe('hide and publish', () => {
   });
 });
 
+describe('the change succeeded but its audit entry did not', () => {
+  test('entry failed: the product is created and returned at once, onAuditFailed is told', async () => {
+    m.log = vi.fn().mockResolvedValue(false);
+    const onAuditFailed = vi.fn();
+    await setup();
+    let created;
+    await act(async () => { created = await ctx.addProduct({ name: 'Sochiq', stock: 1 }, { copyOf: { id: 'p1', name: 'Choyshab' }, onAuditFailed }); });
+    expect(created.id).toBe('p2');
+    expect(ctx.products.map(p => p.id)).toContain('p2');
+    await waitFor(() => expect(onAuditFailed).toHaveBeenCalledTimes(1));
+    expect(onAuditFailed.mock.calls[0][0]).toMatchObject({ action: AUDIT_ACTIONS.PRODUCT_COPY, entityId: 'p2' });
+    expect(m.api.create).toHaveBeenCalledTimes(1);
+  });
+
+  test('entry hangs: create, update, delete and hide finish without waiting for it', async () => {
+    m.log = vi.fn(() => new Promise(() => {}));   // never answers
+    m.api.update = vi.fn(async () => row({ price: 1 }));
+    await setup();
+    const quick = (p) => Promise.race([p.then(() => 'done'), new Promise(r => setTimeout(() => r('blocked'), 200))]);
+    await act(async () => {
+      expect(await quick(ctx.addProduct({ name: 'A' }))).toBe('done');
+      expect(await quick(ctx.updateProduct('p1', { price: 1 }, { before: row() }))).toBe('done');
+      expect(await quick(ctx.toggleProductVisibility('p1', false))).toBe('done');
+      expect(await quick(ctx.deleteProduct('p1'))).toBe('done');
+    });
+    expect(m.log).toHaveBeenCalledTimes(4);
+  });
+
+  test('a failed change still reports nothing to onAuditFailed and writes nothing', async () => {
+    m.api.update = vi.fn().mockRejectedValue(new Error('denied'));
+    const onAuditFailed = vi.fn();
+    await setup();
+    await act(async () => { await expect(ctx.updateProduct('p1', { price: 1 }, { before: row(), onAuditFailed })).rejects.toThrow('denied'); });
+    expect(m.log).not.toHaveBeenCalled();
+    expect(onAuditFailed).not.toHaveBeenCalled();
+  });
+});
+
 describe('productChanges', () => {
   test('a field missing on one side (lightweight catalog row) is not reported as a change', () => {
     expect(productChanges(light(row()), row()).fields).toEqual([]);

@@ -279,6 +279,10 @@ const ProductsSection = () => {
     await saveForm();
   };
 
+  // The change is saved; only its «Audit tarixi» entry could not be written.
+  // Said separately so the admin does not repeat the action.
+  const auditFailed = (done) => () => toast.warning(`${done}, lekin «Audit tarixi» yozuvi tasdiqlanmadi. Amalni takrorlamang.`);
+
   // Saves the open form; true when the product was saved (and the form closed)
   const saveForm = async () => {
     // Never save an edit that did not start from the full database record
@@ -355,7 +359,7 @@ const ProductsSection = () => {
         }
 
         // expectedUpdatedAt: refuse if the product changed since the form loaded it
-        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at, before: editingProduct });
+        await updateProduct(editingProduct.id, productData, { expectedUpdatedAt: editingProduct.updated_at, before: editingProduct, onAuditFailed: auditFailed('Mahsulot saqlandi') });
 
         if (stockIncreased || variantsToNotify.length > 0) {
           const productWithId = { ...productData, id: editingProduct.id };
@@ -373,7 +377,7 @@ const ProductsSection = () => {
           })();
         }
       } else {
-        await addProduct(productData, { copyOf: copySourceRef.current });
+        await addProduct(productData, { copyOf: copySourceRef.current, onAuditFailed: auditFailed(copySourceRef.current ? 'Nusxa saqlandi' : 'Mahsulot qo\'shildi') });
       }
 
       toast.success(editingProduct ? 'Mahsulot yangilandi' : 'Mahsulot qo\'shildi');
@@ -483,7 +487,7 @@ const ProductsSection = () => {
     });
     if (confirmed) {
       try {
-        await deleteProduct(productId);
+        await deleteProduct(productId, { onAuditFailed: auditFailed('Mahsulot o\'chirildi') });
         toast.success('Mahsulot muvaffaqiyatli o\'chirildi');
       } catch (error) {
         console.error('❌ Failed to delete product:', error);
@@ -495,7 +499,7 @@ const ProductsSection = () => {
   const handleToggleVisibility = async (product) => {
     const newVisibility = product.visible === false ? true : false;
     try {
-      await toggleProductVisibility(product.id, newVisibility);
+      await toggleProductVisibility(product.id, newVisibility, { onAuditFailed: auditFailed(newVisibility ? 'Mahsulot ko\'rsatildi' : 'Mahsulot yashirildi') });
       toast.success(newVisibility ? 'Mahsulot ko\'rsatildi' : 'Mahsulot yashirildi');
     } catch (error) {
       console.error('❌ Failed to toggle product visibility:', error);

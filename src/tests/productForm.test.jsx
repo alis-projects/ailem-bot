@@ -114,7 +114,7 @@ const lightweight = (row) => {
   return { ...rest, category: row.category_name, originalPrice: row.original_price, uzumUrl: row.uzum_url, variants: row.variants || [] };
 };
 
-function renderSection() {
+function renderSection(overrides = {}) {
   const value = {
     products: [...m.db.products.values()].map(lightweight),
     categories: [{ id: 'c1', name: 'Choyshablar' }],
@@ -123,7 +123,8 @@ function renderSection() {
     addProduct: vi.fn((p) => productsAPI.create(p)),
     updateProduct: vi.fn((id, updates, options) => productsAPI.update(id, updates, options)),
     deleteProduct: vi.fn(),
-    toggleProductVisibility: vi.fn()
+    toggleProductVisibility: vi.fn(),
+    ...overrides
   };
   render(<AdminContext.Provider value={value}><ProductsSection /></AdminContext.Provider>);
   return value;
@@ -547,7 +548,7 @@ describe('what the form hands to the audit log', () => {
     await click(rowButton('Choyshab', 'Nusxalash'));
     await click(button("Qo'shish"));
     await waitFor(() => expect(ctx.addProduct).toHaveBeenCalledTimes(1));
-    expect(ctx.addProduct.mock.calls[0][1]).toEqual({ copyOf: { id: 'p1', name: 'Choyshab' } });
+    expect(ctx.addProduct.mock.calls[0][1]).toMatchObject({ copyOf: { id: 'p1', name: 'Choyshab' } });
 
     await click(button("Mahsulot qo'shish"));
     set(nameInput(), 'Yangi sochiq');
@@ -558,7 +559,41 @@ describe('what the form hands to the audit log', () => {
     await addImageUrl(IMG1);
     await click(button("Qo'shish"));
     await waitFor(() => expect(ctx.addProduct).toHaveBeenCalledTimes(2));
-    expect(ctx.addProduct.mock.calls[1][1]).toEqual({ copyOf: null });
+    expect(ctx.addProduct.mock.calls[1][1]).toMatchObject({ copyOf: null });
+  });
+});
+
+describe('the product is saved but its audit entry is not', () => {
+  // AdminContext calls onAuditFailed after the change succeeded (see productAudit.test.jsx)
+  const savedButNotLogged = (fn) => vi.fn(async (...args) => {
+    const result = await fn(...args);
+    const options = args[args.length - 1];
+    setTimeout(() => options?.onAuditFailed?.({}), 0);
+    return result;
+  });
+
+  test('a copy: the form closes as saved, success and a «do not repeat» warning are shown, saved once', async () => {
+    const addProduct = savedButNotLogged((p) => productsAPI.create(p));
+    renderSection({ addProduct });
+    await click(rowButton('Choyshab', 'Nusxalash'));
+    await click(button("Qo'shish"));
+    await waitFor(() => expect(m.toast.warning).toHaveBeenCalledWith("Nusxa saqlandi, lekin «Audit tarixi» yozuvi tasdiqlanmadi. Amalni takrorlamang."));
+    expect(m.toast.success).toHaveBeenCalledWith("Mahsulot qo'shildi");
+    expect(addProduct).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Yangi mahsulot qo'shish")).toBeNull();     // form closed
+    expect([...m.db.products.values()].filter(p => p.name === 'Choyshab (Nusxa)')).toHaveLength(1);
+  });
+
+  test('an edit: saved, the warning says so', async () => {
+    const updateProduct = savedButNotLogged((id, u, o) => productsAPI.update(id, u, o));
+    renderSection({ updateProduct });
+    await click(rowButton('Choyshab', 'Tahrirlash'));
+    await screen.findByText('(2 ta rasm)');
+    set(stockInput(), '9');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(m.toast.warning).toHaveBeenCalledWith(expect.stringContaining('Mahsulot saqlandi, lekin «Audit tarixi» yozuvi')));
+    expect(m.toast.success).toHaveBeenCalledWith('Mahsulot yangilandi');
+    expect(m.db.products.get('p1').stock).toBe(9);
   });
 });
 
