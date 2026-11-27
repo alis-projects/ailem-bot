@@ -622,6 +622,60 @@ describe('variant price in the admin form', () => {
   });
 });
 
+describe('variant SKU in the form, «Holat» column', () => {
+  const withVariants = (over = {}) => dbRow({ stock: 0, colors: ['Kulrang', "Kulrang ko'k"], sizes: ['50x70'], variants: [
+    { variant_id: 'va', color: 'Kulrang', size: '50x70', stock: 3, price: null, sku: 'KUL-5', barcode: '1' },
+    { variant_id: 'vb', color: "Kulrang ko'k", size: '50x70', stock: 2, price: null, sku: 'KUL-5-2', barcode: '2' }
+  ], ...over });
+  const skuInput = (label) => screen.getByLabelText(`SKU: ${label}`);
+
+  test('«Holat» shows whether customers see the product', () => {
+    m.db.products = new Map([['p1', dbRow()], ['p2', dbRow({ id: 'p2', name: 'Yashirin choyshab', visible: false })]]);
+    renderSection();
+    const holat = (name) => within(screen.getByText(name, { selector: 'div' }).closest('tr')).getAllByRole('cell')[4].textContent;
+    expect(holat('Choyshab')).toBe('Ko‘rinadi');
+    expect(holat('Yashirin choyshab')).toBe('Yashirin');
+    expect(screen.queryByText('Mavjud')).toBeNull();
+  });
+
+  test('a SKU edited into a duplicate is refused with the variants named; fixing it saves', async () => {
+    m.db.products = new Map([['p1', withVariants()]]);
+    const ctx = await openEdit();
+    expect(skuInput("Kulrang ko'k / 50x70").value).toBe('KUL-5-2');
+    set(skuInput("Kulrang ko'k / 50x70"), 'kul-5');
+    await click(button('Yangilash'));
+    expect(screen.getByText("SKU takrorlanmoqda: «KUL-5» — Kulrang / 50x70, Kulrang ko'k / 50x70. Bitta mahsulot ichida har bir variantning SKU'si boshqacha bo'lishi kerak.")).toBeTruthy();
+    expect(ctx.updateProduct).not.toHaveBeenCalled();
+    set(skuInput("Kulrang ko'k / 50x70"), 'KUL-5-KOK');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(m.db.products.get('p1').variants.map(v => v.sku)).toEqual(['KUL-5', 'KUL-5-KOK']);
+  });
+
+  test('an old duplicate (already in the card) does not block other edits and is not changed', async () => {
+    m.db.products = new Map([['p1', withVariants({ variants: [
+      { variant_id: 'va', color: 'Kulrang', size: '50x70', stock: 3, price: null, sku: 'KUL-5' },
+      { variant_id: 'vb', color: "Kulrang ko'k", size: '50x70', stock: 2, price: null, sku: 'KUL-5' }
+    ] })]]);
+    const ctx = await openEdit();
+    set(nameInput(), 'Choyshab yangi');
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(m.db.products.get('p1').variants.map(v => v.sku)).toEqual(['KUL-5', 'KUL-5']);
+  });
+
+  test('the database refusal is shown in the form and the edits are kept', async () => {
+    m.db.products = new Map([['p1', withVariants()]]);
+    const ctx = await openEdit();
+    set(nameInput(), 'Choyshab tahrir');
+    m.failUpdate = { message: 'duplicate_variant_sku', details: JSON.stringify([{ sku: 'KUL-5', variants: ['Kulrang / 50x70', "Kulrang ko'k / 50x70"] }]) };
+    await click(button('Yangilash'));
+    await waitFor(() => expect(ctx.updateProduct).toHaveBeenCalledTimes(1));
+    expect(screen.getAllByRole('alert').map(a => a.textContent).join(' ')).toContain('Saqlanmadi: SKU takrorlanmoqda: «KUL-5»');
+    expect(nameInput().value).toBe('Choyshab tahrir');
+  });
+});
+
 describe('productForm helpers', () => {
   test('stockError', () => {
     expect(stockError('0')).toBeNull();

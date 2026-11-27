@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { duplicateSkuMessage } from '../utils/variantSku';
 import {
   validateProduct,
   validateCategory,
@@ -233,6 +234,14 @@ export const categoriesAPI = {
 // stock of a variant that the save renames or removes
 // (supabase-migrations/protect-reserved-variants.sql).
 export function productSaveError(error) {
+  if (error?.message === 'duplicate_variant_sku') {
+    let dups = [];
+    try { dups = JSON.parse(error.details || '[]'); } catch { dups = []; }
+    const message = dups.length
+      ? `Saqlanmadi: ${duplicateSkuMessage(dups)}`
+      : "Saqlanmadi: bitta mahsulot ichida ikki variantning SKU'si bir xil.";
+    return Object.assign(new Error(message), { code: 'duplicate_variant_sku', duplicates: dups, cause: error });
+  }
   if (error?.message !== 'reserved_variant_changed') return error;
   let held = [];
   try { held = JSON.parse(error.details || '[]'); } catch { held = []; }
@@ -373,7 +382,7 @@ export const productsAPI = {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) throw productSaveError(error);
 
     // Map database fields back to match app expectations
     return {
