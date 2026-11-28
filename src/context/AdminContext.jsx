@@ -388,6 +388,8 @@ export const AdminProvider = ({ children }) => {
   // 'not_found' when nothing changed; 'already_received' is not an error.
   // Bonus history / debts of one order, for the order card
   const getBonusRecords = async (order) => ordersAPI.getBonusRecords(order?.dbId || order?.id);
+  // Recorded status changes of one order (order card «Holatlar tarixi»)
+  const getOrderEvents = async (order) => ordersAPI.getStatusEvents(order?.dbId || order?.id);
 
   const confirmReturn = async (orderId) => {
     const order = orders.find(o => o.id === orderId || o.dbId === orderId);
@@ -761,6 +763,7 @@ export const AdminProvider = ({ children }) => {
     rejectOrder,
     confirmReturn,
     getBonusRecords,
+    getOrderEvents,
     deleteOrder,
     reviews,
     addReview,
