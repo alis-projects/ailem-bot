@@ -428,29 +428,25 @@ export const AdminProvider = ({ children }) => {
   };
 
   // User management
-  const updateUserBonusPoints = async (userId, points) => {
-    try {
-      // Try in-memory first, fall back to DB fetch (users may not be loaded yet in Phase 2)
-      let user = users.find(u => u.id === userId);
-      if (!user) {
-        user = await usersAPI.getById(userId);
-      }
-      if (!user) throw new Error('User not found');
-
-      const newPoints = Math.max(0, (user.bonusPoints || user.bonus_points || 0) + points);
-      await usersAPI.updateBonusPoints(userId, newPoints);
-
-      setUsers(prev =>
-        prev.map(u =>
-          u.id === userId
-            ? { ...u, bonusPoints: newPoints, bonus_points: newPoints }
-            : u
-        )
-      );
-    } catch (err) {
-      console.error('Failed to update user bonus points:', err);
+  // Change a customer's bonus balance by `delta` on the server
+  // (admin_adjust_bonus: admin check, never below 0, audit row in the same
+  // transaction). Throws with .code when refused.
+  const updateUserBonusPoints = async (userId, delta, reason) => {
+    const result = await usersAPI.adjustBonus(userId, delta, reason);
+    if (result?.result !== 'ok') {
+      const err = new Error(`bonus_${result?.result || 'failed'}`);
+      err.code = result?.result || 'failed';
+      err.old = result?.old;
       throw err;
     }
+    setUsers(prev =>
+      prev.map(u =>
+        u.id === userId
+          ? { ...u, bonusPoints: result.new, bonus_points: result.new }
+          : u
+      )
+    );
+    return result;
   };
 
   // Category management

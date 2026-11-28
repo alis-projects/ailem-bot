@@ -91,7 +91,11 @@ const UsersSection = () => {
       setBonusAmount('');
     } catch (error) {
       console.error('Failed to update bonus points:', error);
-      toast.error('Ballni yangilashda xatolik');
+      toast.error(
+        error?.code === 'insufficient' ? `Foydalanuvchida faqat ${error.old ?? 0} ball bor`
+          : error?.code === 'forbidden' ? "Bonusni o'zgartirishga ruxsat yo'q"
+          : 'Ballni yangilashda xatolik'
+      );
     } finally {
       setUpdatingBonus(false);
     }

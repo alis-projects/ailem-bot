@@ -270,7 +270,7 @@ const CheckoutPage = ({ onNavigate }) => {
       const cleanPhone = formData.phone.replace(/\s/g, ''); // Remove spaces
       if (!user.phone || user.phone !== cleanPhone) {
         try {
-          await usersAPI.update(user.id, { phone: cleanPhone });
+          await usersAPI.updateSelf({ phone: cleanPhone });
           console.log('✅ Phone number saved to user profile');
         } catch (error) {
           console.error('❌ Failed to save phone number:', error);

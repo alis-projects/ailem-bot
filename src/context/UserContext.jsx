@@ -56,11 +56,10 @@ export const UserProvider = ({ children }) => {
         console.log('🔵 Restoring cached user session:', cachedUser.name);
         setUser(cachedUser);
 
-        // Load favorites from Supabase for logged-in users.
-        // getSelf (RPC) reads only the caller's own row — blanket SELECT on
-        // `users` is blocked by RLS for the anon key customers use.
+        // Load favorites for logged-in users from the server (/api/me, session
+        // cookie) — customers never read `users` directly.
         try {
-          const dbUser = await usersAPI.getSelf(cachedUser.id);
+          const dbUser = await usersAPI.getSelf();
           if (dbUser) {
             const dbFavorites = normalizeFavorites(dbUser.favorites || []);
             setFavorites(dbFavorites);
@@ -223,32 +222,11 @@ export const UserProvider = ({ children }) => {
     setFavorites([]);
   }, []);
 
-  const updateBonusPoints = useCallback(async (points) => {
-    const currentUser = userRef.current;
-    if (!currentUser || currentUser.isGuest) return;
-
-    try {
-      const newPoints = currentUser.bonusPoints + points;
-
-      await usersAPI.updateBonusPoints(currentUser.id, newPoints);
-
-      setUser(prev => ({
-        ...prev,
-        bonusPoints: newPoints
-      }));
-
-      // Update cache
-      saveToLocalStorage('cachedUser', { ...currentUser, bonusPoints: newPoints });
-    } catch (err) {
-      console.error('Failed to update bonus points:', err);
-    }
-  }, []);
-
   const setReferredBy = useCallback(async (referralCode) => {
     const currentUser = userRef.current;
     if (!currentUser?.referredBy && currentUser && !currentUser.isGuest) {
       try {
-        await usersAPI.update(currentUser.id, { referred_by: referralCode });
+        await usersAPI.updateSelf({ referredBy: referralCode });
         console.log('Referred by saved to Supabase:', referralCode);
       } catch (err) {
         console.error('Failed to save referred_by to Supabase:', err);
@@ -260,34 +238,6 @@ export const UserProvider = ({ children }) => {
       }));
 
       saveToLocalStorage('cachedUser', { ...currentUser, referredBy: referralCode });
-    }
-  }, []);
-
-  const addReferral = useCallback(async (referredUserId, referredUserName, orderTotal = 0) => {
-    const currentUser = userRef.current;
-    if (!currentUser || currentUser.isGuest) return;
-
-    try {
-      // Get configured commission percentage from localStorage
-      const bonusConfig = loadFromLocalStorage('bonusConfig', { referralCommission: 3 });
-      const commissionPercentage = bonusConfig?.referralCommission || 3;
-      const commissionAmount = Math.round((orderTotal * commissionPercentage) / 100);
-
-      const newReferrals = currentUser.referrals + 1;
-      const newBonusPoints = currentUser.bonusPoints + commissionAmount;
-
-      await usersAPI.incrementReferrals(currentUser.id);
-      await usersAPI.updateBonusPoints(currentUser.id, newBonusPoints);
-
-      setUser(prev => ({
-        ...prev,
-        referrals: newReferrals,
-        bonusPoints: newBonusPoints
-      }));
-
-      saveToLocalStorage('cachedUser', { ...currentUser, referrals: newReferrals, bonusPoints: newBonusPoints });
-    } catch (err) {
-      console.error('Failed to add referral:', err);
     }
   }, []);
 
@@ -336,9 +286,7 @@ export const UserProvider = ({ children }) => {
   const contextValue = {
     user,
     setUser,
-    updateBonusPoints,
     setReferredBy,
-    addReferral,
     favorites,
     toggleFavorite,
     isFavorite,
