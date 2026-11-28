@@ -291,10 +291,13 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     expect(await balance(buyerId)).toBe(5000);
     expect(await row(o1.orderNumber)).toMatchObject({ status: 'rejected', bonus_reservation: 'released' });
 
-    // admin rejects an unpaid order (twice)
+    // admin rejects an unpaid order (twice) — through admin_reject_order; a
+    // direct status UPDATE is refused (add-order-status-transitions.sql)
     const o2 = await reserve(7000);
-    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o2.orderNumber);
-    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o2.orderNumber);
+    expect((await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o2.orderNumber)).error?.message).toBe('order_status_transition');
+    expect(await balance(buyerId)).toBe(0);
+    expect((await admin.rpc('admin_reject_order', { p_ref: o2.orderNumber })).data?.result).toBe('rejected');
+    expect((await admin.rpc('admin_reject_order', { p_ref: o2.orderNumber })).data?.result).toBe('already_rejected');
     expect(await balance(buyerId)).toBe(7000);
     expect(await row(o2.orderNumber)).toMatchObject({ bonus_reservation: 'released' });
 
@@ -395,31 +398,35 @@ describe.skipIf(!enabled)('local stack: server-priced, session-bound customer or
     // D5: transaction opened, then the order is rejected (admin) before Payme performs: Perform is refused
     const o5 = await reserve(1000);
     expect((await pay(o5, `${tag}-d5`, 99000)).result?.state).toBe(1);
-    await admin.from('orders').update({ status: 'rejected' }).eq('order_number', o5.orderNumber);
+    expect((await admin.rpc('admin_reject_order', { p_ref: o5.orderNumber })).data?.result).toBe('rejected');
     const p5 = await payme('PerformTransaction', { id: `${tag}-d5` });
     expect(p5.error).toBeTruthy();
     await consistent(o5, 1000, 0);
   }, 120000);
 
   test('admin can process orders manually; the public key cannot', async () => {
-    // what ordersAPI.updateStatus does: find by order_number, update by id
+    // manual processing goes through the official operations; a direct status
+    // UPDATE outside approved → shipped → delivered is refused
     const { data: found, error: findErr } = await admin.from('orders').select('id, status').eq('order_number', guestOrder.orderNumber);
     expect(findErr).toBeNull();
     expect(found).toHaveLength(1);
-    const { data: approved, error: updErr } = await admin.from('orders').update({ status: 'approved' }).eq('id', found[0].id).select().single();
-    expect(updErr).toBeNull();
-    expect(approved.status).toBe('approved');
-    const { data: shipped } = await admin.from('orders').update({ status: 'shipped' }).eq('id', found[0].id).select().single();
-    expect(shipped.status).toBe('shipped');
-    const { data: rejected } = await admin.from('orders').update({ status: 'rejected' }).eq('order_number', bonusOrder.orderNumber).select().single();
-    expect(rejected.status).toBe('rejected');
+    expect((await admin.from('orders').update({ status: 'approved' }).eq('id', found[0].id)).error?.message).toBe('order_status_transition');
+    expect((await admin.rpc('admin_approve_order', { p_ref: guestOrder.orderNumber })).data?.result).toBe('approved');
+    expect((await admin.rpc('admin_set_order_status', { p_ref: guestOrder.orderNumber, p_expected: 'approved', p_status: 'shipped' })).data?.result).toBe('ok');
+    expect((await row(guestOrder.orderNumber)).status).toBe('shipped');
+    // bonusOrder is PAID (scenario A): rejecting it is refused both ways — a
+    // paid order is refunded through Payme, not rejected (audit finding 2, S5)
+    const paidBefore = await row(bonusOrder.orderNumber);
+    expect((await admin.from('orders').update({ status: 'rejected' }).eq('order_number', bonusOrder.orderNumber)).error?.message).toBe('order_status_transition');
+    expect((await admin.rpc('admin_reject_order', { p_ref: bonusOrder.orderNumber })).data?.result).toBe('already_processed');
+    expect(await row(bonusOrder.orderNumber)).toMatchObject({ status: 'approved', bonus_reservation: paidBefore.bonus_reservation, stock_reservation: paidBefore.stock_reservation });
     // the admin list shows server-priced orders
     const { data: list } = await admin.from('orders').select('order_number, total').in('order_number', [guestOrder.orderNumber, userOrder.orderNumber, bonusOrder.orderNumber]);
     expect(list).toHaveLength(3);
 
     const anonUpd = await anon.from('orders').update({ status: 'approved' }).eq('order_number', bonusOrder.orderNumber).select();
     expect(anonUpd.error !== null || (anonUpd.data || []).length === 0).toBe(true);
-    expect((await row(bonusOrder.orderNumber)).status).toBe('rejected');
+    expect((await row(bonusOrder.orderNumber)).status).toBe('approved');
   });
 
   test('logout ends the session for checkout', async () => {

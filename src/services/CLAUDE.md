@@ -26,7 +26,7 @@ All API modules auto-transform DB snake_case ↔ app camelCase.
 - `lightweight=true` omits heavy columns; full data via `productsAPI.getById()` on demand
 
 ### ordersAPI
-- `getAll()`, `getById(id)`, `getByUser(userId)`, `create(order)`, `updateStatus(id, status)`, `delete(id)`
+- `getAll()`, `getById(id)`, `getByUser(userId)`, `create(order)`, `setStatus(ref, expected, status)` (RPC admin_set_order_status), `delete(id)`
 
 ### reviewsAPI
 - `getAll()`, `getByProduct(productId)`, `create(review)`, `approve(id)`, `delete(id)`

@@ -8,7 +8,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice, formatDate, getStatusLabel } from '../../../utils/helpers';
 import { exportOrders, exportOrderItems } from '../../../utils/csvExport';
-import { notifyUserOrderStatus, notifyReferrerReward } from '../../../services/telegram';
+import { notifyReferrerReward } from '../../../services/telegram';
 import { printShippingLabel, printMultipleLabels } from '../../../utils/shippingLabel';
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
 
@@ -158,6 +158,15 @@ const OrdersSection = ({ onImageClick }) => {
     }
   };
 
+  // Why the database refused a status change (nothing changed)
+  const statusErrorMessage = (error) => {
+    if (error?.code === 'not_allowed') return `Buyurtma holati: ${getStatusLabel(error.status)}. Bu holatdan o'zgartirib bo'lmaydi.`;
+    if (error?.code === 'status_changed') return `Buyurtma holati o'zgargan: ${getStatusLabel(error.status)}. Ro'yxat yangilandi.`;
+    if (error?.code === 'not_found') return 'Buyurtma topilmadi';
+    if (error?.code === 'forbidden') return "Ruxsat yo'q";
+    return "Holatni yangilashda xatolik. Qayta urinib ko'ring.";
+  };
+
   const handleMarkShipped = async (orderId) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
@@ -172,12 +181,12 @@ const OrdersSection = ({ onImageClick }) => {
 
     if (confirmed) {
       try {
+        // the customer is notified by updateOrderStatus
         await updateOrderStatus(orderId, 'shipped');
-        await notifyUserOrderStatus(order, 'shipped');
         toast.success('Buyurtma jo\'natildi deb belgilandi');
       } catch (error) {
         console.error('❌ Failed to mark as shipped:', error);
-        toast.error('Holatni yangilashda xatolik. Qayta urinib ko\'ring.');
+        toast.error(statusErrorMessage(error));
       }
     }
   };
@@ -196,12 +205,12 @@ const OrdersSection = ({ onImageClick }) => {
 
     if (confirmed) {
       try {
+        // the customer is notified by updateOrderStatus
         await updateOrderStatus(orderId, 'delivered');
-        await notifyUserOrderStatus(order, 'delivered');
         toast.success('Buyurtma yetkazildi deb belgilandi');
       } catch (error) {
         console.error('❌ Failed to mark as delivered:', error);
-        toast.error('Holatni yangilashda xatolik. Qayta urinib ko\'ring.');
+        toast.error(statusErrorMessage(error));
       }
     }
   };
@@ -286,6 +295,8 @@ const OrdersSection = ({ onImageClick }) => {
     setBulkProgress({ isProcessing: true, current: 0, total: count, action: actionLabels[action] || action });
     let successCount = 0;
     let failCount = 0;
+    let skipCount = 0;      // not in the status this action applies to
+    let refusedCount = 0;   // the database refused (status changed meanwhile / not allowed)
 
     try {
       for (let i = 0; i < selectedOrders.length; i++) {
@@ -306,41 +317,43 @@ const OrdersSection = ({ onImageClick }) => {
               if (order.status === 'pending') {
                 await approveOrder(orderId);
                 successCount++;
-              }
+              } else skipCount++;
               break;
             case 'Mark as Shipped':
               if (order.status === 'approved') {
                 await updateOrderStatus(orderId, 'shipped');
                 successCount++;
-              }
+              } else skipCount++;
               break;
             case 'Mark as Delivered':
               if (order.status === 'shipped') {
                 await updateOrderStatus(orderId, 'delivered');
                 successCount++;
-              }
+              } else skipCount++;
               break;
             case 'Reject':
               if (order.status === 'pending') {
                 await rejectOrder(orderId);
                 successCount++;
-              }
+              } else skipCount++;
               break;
           }
         } catch (err) {
           console.error(`Failed to ${action} order ${orderId}:`, err);
-          failCount++;
+          if (['not_allowed', 'status_changed', 'not_pending', 'already_processed', 'already_fulfilled'].includes(err?.code)) refusedCount++;
+          else failCount++;
         }
       }
 
       setSelectedOrders([]);
       setBulkAction('');
 
-      if (failCount > 0) {
-        toast.warning(`Yakunlandi: ${successCount} ta muvaffaqiyatli, ${failCount} ta xato`);
-      } else {
-        toast.success(`${successCount} ta buyurtma muvaffaqiyatli yangilandi`);
-      }
+      const parts = [`${successCount} ta yangilandi`];
+      if (skipCount) parts.push(`${skipCount} ta o'tkazib yuborildi (holati mos emas)`);
+      if (refusedCount) parts.push(`${refusedCount} ta rad etildi (holati o'zgargan)`);
+      if (failCount) parts.push(`${failCount} ta xato`);
+      if (failCount || refusedCount || skipCount) toast.warning(`Yakunlandi: ${parts.join(', ')}`);
+      else toast.success(`${successCount} ta buyurtma muvaffaqiyatli yangilandi`);
     } catch (error) {
       console.error('❌ Bulk action failed:', error);
       toast.error('Ommaviy amal bajarilmadi. Qayta urinib ko\'ring.');

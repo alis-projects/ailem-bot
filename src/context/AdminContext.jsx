@@ -263,17 +263,35 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
+  // «Jo'natildi» / «Yetkazildi»: checked by the database (approved → shipped →
+  // delivered only, and only if the order is still in the status this list
+  // shows). Throws an Error with .code ('not_allowed' / 'status_changed' /
+  // 'not_found' / 'forbidden') and .status (current) when nothing changed.
   const updateOrderStatus = async (orderId, status) => {
     try {
       const order = orders.find(o => o.id === orderId || o.dbId === orderId);
-      const updatedOrder = await ordersAPI.updateStatus(orderId, status);
-      
+      const result = await ordersAPI.setStatus(order?.dbId || orderId, order?.status, status);
+      if (result?.result !== 'ok' && result?.result !== 'already') {
+        const err = new Error(`status_${result?.result || 'failed'}`);
+        err.code = result?.result || 'failed';
+        err.status = result?.status;
+        // show the real status in the list
+        try {
+          const fresh = await ordersAPI.getById(order?.dbId || orderId);
+          setOrders(prev => prev.map(o => (o.id === orderId || o.dbId === orderId) ? fresh : o));
+        } catch (e) {
+          console.error('Failed to reload order:', e);
+        }
+        throw err;
+      }
+      const updatedOrder = await ordersAPI.getById(order?.dbId || orderId);
       setOrders(prev =>
-        prev.map(order =>
+        prev.map(o =>
           // Match by id (order_number) or dbId (UUID)
-          (order.id === orderId || order.dbId === orderId) ? updatedOrder : order
+          (o.id === orderId || o.dbId === orderId) ? updatedOrder : o
         )
       );
+      if (result.result === 'already') return updatedOrder;
 
       // Send notification to customer for shipped and delivered status
       if (order && (status === 'shipped' || status === 'delivered')) {
