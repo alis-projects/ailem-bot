@@ -7,6 +7,7 @@ import { AdminContext } from '../../../context/AdminContext';
 import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice, formatDate, getStatusLabel } from '../../../utils/helpers';
+import { inTashkentDayRange, orderMatchesSearch } from '../../../utils/orderFilters';
 import { exportOrders, exportOrderItems } from '../../../utils/csvExport';
 import { notifyReferrerReward } from '../../../services/telegram';
 import { printShippingLabel, printMultipleLabels } from '../../../utils/shippingLabel';
@@ -39,6 +40,8 @@ const OrdersSection = ({ onImageClick }) => {
   // Date range filter
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  // Search: order number, customer name, phone (works together with the filters)
+  const [searchQuery, setSearchQuery] = useState('');
 
   const filteredOrders = useMemo(() => {
     return orders.filter(order => {
@@ -51,14 +54,12 @@ const OrdersSection = ({ onImageClick }) => {
         (sourceFilter === 'cash' && isCashOrder) ||
         (sourceFilter === 'online' && !isCashOrder);
 
-      // Date filter
-      const orderDate = new Date(order.createdAt || order.date);
-      const matchesDateFrom = !dateFrom || orderDate >= new Date(dateFrom);
-      const matchesDateTo = !dateTo || orderDate <= new Date(dateTo + 'T23:59:59');
+      // Date filter: whole Tashkent calendar days, inclusive (audit finding 6)
+      const matchesDate = inTashkentDayRange(order.createdAt || order.date, dateFrom, dateTo);
 
-      return matchesStatus && matchesSource && matchesDateFrom && matchesDateTo;
+      return matchesStatus && matchesSource && matchesDate && orderMatchesSearch(order, searchQuery);
     });
-  }, [orders, statusFilter, sourceFilter, dateFrom, dateTo]);
+  }, [orders, statusFilter, sourceFilter, dateFrom, dateTo, searchQuery]);
 
   // Count orders by source
   const cashOrdersCount = orders.filter(o => o.paymentMethod === 'cash').length;
@@ -416,14 +417,37 @@ const OrdersSection = ({ onImageClick }) => {
       </div>
 
       <div className="p-4 space-y-4" style={{ borderBottom: '1px solid var(--border)' }}>
+        {/* Search */}
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Qidirish: buyurtma raqami, ism yoki telefon"
+            aria-label="Buyurtmalarni qidirish"
+            className="a-input"
+            style={{ minWidth: 280, flex: '1 1 280px', maxWidth: 420 }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="a-btn"
+              style={{ padding: '4px 9px', fontSize: 11 }}
+            >
+              Qidiruvni tozalash
+            </button>
+          )}
+        </div>
+
         {/* Date Range Filter */}
         <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-medium a-muted">Sana oralig'i:</span>
+          <span className="text-sm font-medium a-muted" title="Toshkent vaqti bo'yicha butun kunlar">Sana oralig'i (Toshkent vaqti):</span>
           <div className="flex items-center gap-2">
             <input
               type="date"
               value={dateFrom}
               onChange={(e) => setDateFrom(e.target.value)}
+              aria-label="Sanadan"
               className="a-input"
               style={{ width: 'auto' }}
               placeholder="Dan"
@@ -433,6 +457,7 @@ const OrdersSection = ({ onImageClick }) => {
               type="date"
               value={dateTo}
               onChange={(e) => setDateTo(e.target.value)}
+              aria-label="Sanagacha"
               className="a-input"
               style={{ width: 'auto' }}
               placeholder="Gacha"
@@ -447,7 +472,7 @@ const OrdersSection = ({ onImageClick }) => {
               Sanalarni tozalash
             </button>
           )}
-          <span className="ml-auto text-sm a-faint">
+          <span className="ml-auto text-sm a-faint" data-testid="orders-count">
             {orders.length} tadan {filteredOrders.length} ta ko'rsatilmoqda
           </span>
         </div>
