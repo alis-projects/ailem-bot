@@ -246,8 +246,14 @@ const OrdersSection = ({ onImageClick }) => {
     );
   };
 
+  // Bulk actions apply only to the selected orders the current filter shows
+  // (audit finding 4): a selection hidden by a filter change is never touched
+  const visibleIds = useMemo(() => new Set(filteredOrders.map(o => o.id)), [filteredOrders]);
+  const visibleSelected = useMemo(() => selectedOrders.filter(id => visibleIds.has(id)), [selectedOrders, visibleIds]);
+  const hiddenSelectedCount = selectedOrders.length - visibleSelected.length;
+
   const handleSelectAll = () => {
-    if (selectedOrders.length === filteredOrders.length) {
+    if (filteredOrders.length > 0 && visibleSelected.length === filteredOrders.length) {
       setSelectedOrders([]);
     } else {
       setSelectedOrders(filteredOrders.map(o => o.id));
@@ -265,95 +271,73 @@ const OrdersSection = ({ onImageClick }) => {
     }
   };
 
+  // Which status each bulk action applies to
+  const BULK_ACTIONS = {
+    'Approve': { label: 'Tasdiqlash', from: 'pending' },
+    'Mark as Shipped': { label: 'Jo\'natildi', from: 'approved' },
+    'Mark as Delivered': { label: 'Yetkazildi', from: 'shipped' },
+    'Reject': { label: 'Rad etish', from: 'pending' }
+  };
+  // a refusal returned by the database operation (a known result code), as
+  // opposed to a network / unexpected error
+  const isServerRefusal = (err) => typeof err?.code === 'string' && /^[a-z_]+$/.test(err.code) && err.code !== 'failed';
+
   const handleBulkAction = async () => {
-    if (!bulkAction || selectedOrders.length === 0) {
+    const spec = BULK_ACTIONS[bulkAction];
+    if (!spec || visibleSelected.length === 0) {
       toast.warning('Iltimos, buyurtmalar va amalni tanlang');
       return;
     }
-
     const action = bulkAction;
-    const count = selectedOrders.length;
+    // only what is selected AND visible now; status as the list shows it
+    const targets = visibleSelected.map(id => orders.find(o => o.id === id)).filter(Boolean);
+    const applicable = targets.filter(o => o.status === spec.from);
+    const notApplicable = targets.length - applicable.length;
 
-    const actionLabels = {
-      'Approve': 'Tasdiqlash',
-      'Mark as Shipped': 'Jo\'natildi',
-      'Mark as Delivered': 'Yetkazildi',
-      'Reject': 'Rad etish'
-    };
+    if (applicable.length === 0) {
+      toast.warning(`Tanlangan ${targets.length} ta buyurtmaning hech biri «${spec.label}» uchun mos holatda emas`);
+      return;
+    }
 
+    const lines = [`«${spec.label}» ${applicable.length} ta buyurtmaga qo'llanadi.`];
+    if (notApplicable) lines.push(`${notApplicable} tasi holati mos emas — o'tkazib yuboriladi.`);
+    if (hiddenSelectedCount) lines.push(`Filtrda ko'rinmaydigan ${hiddenSelectedCount} ta tanlangan buyurtmaga tegilmaydi.`);
     const confirmed = await confirm({
       title: 'Ommaviy amal',
-      message: `${count} ta buyurtmani "${actionLabels[action] || action}" qilmoqchimisiz?`,
+      message: lines.join(' '),
       type: action === 'Reject' ? 'danger' : 'info',
-      confirmText: actionLabels[action] || action,
+      confirmText: `${spec.label} (${applicable.length})`,
       cancelText: 'Bekor qilish'
     });
-
     if (!confirmed) return;
 
-    // Start bulk progress tracking
-    setBulkProgress({ isProcessing: true, current: 0, total: count, action: actionLabels[action] || action });
-    let successCount = 0;
-    let failCount = 0;
-    let skipCount = 0;      // not in the status this action applies to
-    let refusedCount = 0;   // the database refused (status changed meanwhile / not allowed)
+    setBulkProgress({ isProcessing: true, current: 0, total: applicable.length, action: spec.label });
+    let updated = 0;
+    let refused = 0;   // the database refused (status changed meanwhile, not allowed, no stock, …)
+    let errors = 0;    // network / unexpected
 
     try {
-      for (let i = 0; i < selectedOrders.length; i++) {
-        const orderId = selectedOrders[i];
-        const order = orders.find(o => o.id === orderId);
-
-        // Update progress
+      for (let i = 0; i < applicable.length; i++) {
+        const orderId = applicable[i].id;
         setBulkProgress(prev => ({ ...prev, current: i + 1 }));
-
-        if (!order) {
-          failCount++;
-          continue;
-        }
-
         try {
-          switch (action) {
-            case 'Approve':
-              if (order.status === 'pending') {
-                await approveOrder(orderId);
-                successCount++;
-              } else skipCount++;
-              break;
-            case 'Mark as Shipped':
-              if (order.status === 'approved') {
-                await updateOrderStatus(orderId, 'shipped');
-                successCount++;
-              } else skipCount++;
-              break;
-            case 'Mark as Delivered':
-              if (order.status === 'shipped') {
-                await updateOrderStatus(orderId, 'delivered');
-                successCount++;
-              } else skipCount++;
-              break;
-            case 'Reject':
-              if (order.status === 'pending') {
-                await rejectOrder(orderId);
-                successCount++;
-              } else skipCount++;
-              break;
-          }
+          if (action === 'Approve') await approveOrder(orderId);
+          else if (action === 'Reject') await rejectOrder(orderId);
+          else await updateOrderStatus(orderId, action === 'Mark as Shipped' ? 'shipped' : 'delivered');
+          updated++;
         } catch (err) {
           console.error(`Failed to ${action} order ${orderId}:`, err);
-          if (['not_allowed', 'status_changed', 'not_pending', 'already_processed', 'already_fulfilled'].includes(err?.code)) refusedCount++;
-          else failCount++;
+          if (isServerRefusal(err)) refused++;
+          else errors++;
         }
       }
 
       setSelectedOrders([]);
       setBulkAction('');
 
-      const parts = [`${successCount} ta yangilandi`];
-      if (skipCount) parts.push(`${skipCount} ta o'tkazib yuborildi (holati mos emas)`);
-      if (refusedCount) parts.push(`${refusedCount} ta rad etildi (holati o'zgargan)`);
-      if (failCount) parts.push(`${failCount} ta xato`);
-      if (failCount || refusedCount || skipCount) toast.warning(`Yakunlandi: ${parts.join(', ')}`);
-      else toast.success(`${successCount} ta buyurtma muvaffaqiyatli yangilandi`);
+      const summary = `Yangilandi: ${updated} · Holati mos emas (o'tkazildi): ${notApplicable} · Server rad etdi: ${refused}` + (errors ? ` · Xato: ${errors}` : '');
+      if (notApplicable || refused || errors) toast.warning(summary);
+      else toast.success(summary);
     } catch (error) {
       console.error('❌ Bulk action failed:', error);
       toast.error('Ommaviy amal bajarilmadi. Qayta urinib ko\'ring.');
@@ -490,29 +474,36 @@ const OrdersSection = ({ onImageClick }) => {
         )}
 
         {selectedOrders.length > 0 && !bulkProgress.isProcessing && (
-          <div className="flex items-center gap-3 p-3 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-              {selectedOrders.length} ta buyurtma tanlandi
+          <div className="flex items-center gap-3 p-3 rounded-lg flex-wrap" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }} data-testid="bulk-selected">
+              {visibleSelected.length} ta buyurtma tanlandi
             </span>
+            {hiddenSelectedCount > 0 && (
+              <span className="text-xs a-muted" data-testid="bulk-hidden">
+                (+{hiddenSelectedCount} ta filtrda yashirin — ularga amal qo'llanmaydi)
+              </span>
+            )}
             <button
               onClick={() => {
-                const ordersToPrint = orders.filter(o => selectedOrders.includes(o.id));
+                const ordersToPrint = orders.filter(o => visibleSelected.includes(o.id));
                 printMultiplePackingSlips(ordersToPrint);
               }}
-              className="a-btn"
+              disabled={visibleSelected.length === 0}
+              className="a-btn disabled:opacity-50"
             >
               <Package className="w-4 h-4" />
-              Qadoqlash {selectedOrders.length}
+              Qadoqlash {visibleSelected.length}
             </button>
             <button
               onClick={() => {
-                const ordersToPrint = orders.filter(o => selectedOrders.includes(o.id));
+                const ordersToPrint = orders.filter(o => visibleSelected.includes(o.id));
                 printMultipleLabels(ordersToPrint);
               }}
-              className="a-btn"
+              disabled={visibleSelected.length === 0}
+              className="a-btn disabled:opacity-50"
             >
               <Printer className="w-4 h-4" />
-              Yorliq {selectedOrders.length}
+              Yorliq {visibleSelected.length}
             </button>
             <select
               value={bulkAction}
@@ -528,7 +519,7 @@ const OrdersSection = ({ onImageClick }) => {
             </select>
             <button
               onClick={handleBulkAction}
-              disabled={!bulkAction || bulkProgress.isProcessing}
+              disabled={!bulkAction || bulkProgress.isProcessing || visibleSelected.length === 0}
               className="a-btn a-btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {bulkProgress.isProcessing ? 'Bajarilmoqda...' : 'Qo\'llash'}
@@ -550,7 +541,7 @@ const OrdersSection = ({ onImageClick }) => {
               <th>
                 <input
                   type="checkbox"
-                  checked={selectedOrders.length === filteredOrders.length && filteredOrders.length > 0}
+                  checked={filteredOrders.length > 0 && visibleSelected.length === filteredOrders.length}
                   onChange={handleSelectAll}
                   className="w-4 h-4 rounded"
                   style={{ accentColor: 'var(--accent)' }}
