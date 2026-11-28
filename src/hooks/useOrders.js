@@ -10,12 +10,12 @@ export const useOrders = () => {
 
   // Admin sessions load ALL orders into AdminContext (Phase 2). Customers use the
   // anon key, for which blanket SELECT on `orders` is blocked by RLS — so a
-  // logged-in customer fetches only their OWN orders via the get_user_orders RPC.
+  // logged-in customer fetches only their OWN orders from the server (/api/me/orders).
   useEffect(() => {
     let active = true;
     const uid = user?.id;
     if (uid && !user?.isGuest && !String(uid).startsWith('guest-')) {
-      ordersAPI.getUserOrdersSelf(uid)
+      ordersAPI.getUserOrdersSelf()
         .then(o => { if (active) setSelfOrders(o); })
         .catch(err => console.error('❌ Failed to load your orders:', err));
     } else {

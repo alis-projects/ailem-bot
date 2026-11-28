@@ -636,17 +636,35 @@ export const usersAPI = {
     return this._mapUserFromDB(data);
   },
 
-  // Get the CALLER'S OWN user row via the get_user_self RPC.
-  // Customers hold only the anon key (no Supabase Auth session), so blanket
-  // SELECT on `users` is denied by RLS — this SECURITY DEFINER RPC returns just
-  // their own row, keyed by the UUID they already possess. Use this (not getById)
-  // from any customer/anon context (cart restore, profile refresh).
-  async getSelf(userId) {
-    const { data, error } = await supabase.rpc('get_user_self', { p_user_id: userId });
-    if (error) throw error;
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) return null;
-    return this._mapUserFromDB(row);
+  // Get the CALLER'S OWN user row (server, session cookie).
+  // The signed-in customer's own row, through the server (/api/me) which takes
+  // the identity from the httpOnly session cookie — customers never read
+  // `users` directly (RLS: admin only, secure-users.sql). null when signed out.
+  async getSelf() {
+    const res = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) return null;
+    if (!res.ok) throw new Error(`me: ${res.status}`);
+    const { user } = await res.json();
+    return user ? this._mapUserFromDB(user) : null;
+  },
+
+  // Change the signed-in customer's own cart / favorites / phone / referredBy
+  // (the only fields the server accepts). Throws on refusal.
+  async updateSelf(fields) {
+    const res = await fetch('/api/me', {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields)
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(json.message || `me: ${res.status}`);
+      err.code = json.error;
+      err.status = res.status;
+      throw err;
+    }
+    return json.user ? this._mapUserFromDB(json.user) : null;
   },
 
   // Get or create user by email or phone
@@ -742,43 +760,23 @@ export const usersAPI = {
     return this._mapUserFromDB(data);
   },
 
-  // Update bonus points
-  async updateBonusPoints(userId, points) {
-    const { data, error } = await supabase
-      .from('users')
-      .update({ bonus_points: points })
-      .eq('id', userId)
-      .select()
-      .single();
-
+  // Admin: change a customer's bonus balance by `delta` (server checks admin
+  // rights, never below 0, one transaction). Returns { result, old, new }.
+  async adjustBonus(userId, delta, reason) {
+    const { data, error } = await supabase.rpc('admin_adjust_bonus', {
+      p_user_id: userId, p_delta: delta, p_reason: reason || null
+    });
     if (error) throw error;
-    return this._mapUserFromDB(data);
+    return data;
   },
 
-  // Update user favorites
-  async updateFavorites(userId, favorites) {
-    const { data, error } = await supabase
-      .from('users')
-      .update({ favorites: favorites })
-      .eq('id', userId)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return this._mapUserFromDB(data);
+  // The signed-in customer's own favorites / cart (through /api/me)
+  async updateFavorites(_userId, favorites) {
+    return this.updateSelf({ favorites });
   },
 
-  // Update user cart
-  async updateCart(userId, cart) {
-    const { data, error } = await supabase
-      .from('users')
-      .update({ cart: cart })
-      .eq('id', userId)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return this._mapUserFromDB(data);
+  async updateCart(_userId, cart) {
+    return this.updateSelf({ cart });
   },
 
   // Get all users (admin)
@@ -1106,21 +1104,24 @@ export const ordersAPI = {
 
   // ---- Own-data reads for anon/customer contexts (RLS blocks blanket SELECT) ----
 
-  // A logged-in customer's own orders (order history). Uses get_user_orders RPC.
-  async getUserOrdersSelf(userId) {
-    const { data, error } = await supabase.rpc('get_user_orders', { p_user_id: userId });
-    if (error) throw error;
-    return (data || []).map(order => this._mapOrderFromDB(order));
+  // The signed-in customer's own orders, through the server (/api/me/orders).
+  async getUserOrdersSelf() {
+    const res = await fetch('/api/me/orders', { credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) return [];
+    if (!res.ok) throw new Error(`me/orders: ${res.status}`);
+    const { orders } = await res.json();
+    return (orders || []).map(order => this._mapOrderFromDB(order));
   },
 
-  // A single order by ref (order_number or UUID) — payment-status polling.
-  // Works for guests; caller holds their own order ref. Uses get_order_by_ref RPC.
+  // One order by ref (order_number or UUID) — payment-status polling. The
+  // server returns the whole order to its owner, and to anyone else (guests)
+  // only the status fields, never the delivery details.
   async getSelfByRef(ref) {
-    const { data, error } = await supabase.rpc('get_order_by_ref', { p_ref: String(ref) });
-    if (error) throw error;
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) throw new Error(`Order not found: ${ref}`);
-    return this._mapOrderFromDB(row);
+    const res = await fetch(`/api/orders/status?ref=${encodeURIComponent(String(ref))}`, { credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 404) throw new Error(`Order not found: ${ref}`);
+    if (!res.ok) throw new Error(`orders/status: ${res.status}`);
+    const { order } = await res.json();
+    return this._mapOrderFromDB(order);
   },
 
   // A cashier's own POS orders (CashierMode today's-sales). Uses get_cashier_orders RPC.

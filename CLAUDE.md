@@ -308,6 +308,11 @@ https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://www.ailem.uz/api/supp
 | `/api/support/message` | POST | Send user message + forward to Telegram |
 | `/api/support/messages` | GET | Poll messages by session_id |
 | `/api/support/webhook` | POST | Receive Telegram replies from admin |
+| `/api/me` | GET/PATCH | Signed-in customer's own row (session cookie); PATCH only cart / favorites / phone / referredBy |
+| `/api/me/orders` | GET | Signed-in customer's own orders |
+| `/api/orders/status` | GET | Order status by ref: owner gets the full order, others only status fields (no delivery details) |
+
+**`users` is admin-only (RLS, `secure-users.sql`).** Customers never touch `users` from the browser — only through the routes above. `bonus_points` changes only via SECURITY DEFINER functions (`admin_adjust_bonus` for admins, payment/order functions on the server).
 | `/api/telegram/send` | POST | Admin-only (Supabase JWT + `admin_users`) proxy for `sendMessage`/`sendPhoto` |
 
 ## Performance Optimizations
