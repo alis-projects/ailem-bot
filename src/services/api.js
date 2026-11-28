@@ -1245,65 +1245,16 @@ export const ordersAPI = {
     return data;
   },
 
-  // Update order status
-  async updateStatus(id, status) {
-    console.log('🔍 Updating order status. ID received:', id, 'Status:', status);
-    
-    // First, try to find the order by order_number (human-readable ID)
-    const { data: foundOrders, error: findError } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('order_number', id);
-    
-    if (findError) {
-      console.error('❌ Error finding order:', findError);
-      throw findError;
-    }
-    
-    if (!foundOrders || foundOrders.length === 0) {
-      // If not found by order_number, try by UUID id
-      console.log('⚠️ Order not found by order_number, trying UUID...');
-      const { data: uuidOrders, error: uuidError } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('id', id);
-      
-      if (uuidError) throw uuidError;
-      if (!uuidOrders || uuidOrders.length === 0) {
-        throw new Error(`Order not found with id: ${id}`);
-      }
-      
-      // Update using UUID
-      const { data: updated, error: updateError } = await supabase
-        .from('orders')
-        .update({ status })
-        .eq('id', id)
-        .select()
-        .single();
-      
-      if (updateError) throw updateError;
-      console.log('✅ Order updated by UUID:', updated);
-      return this._mapOrderFromDB(updated);
-    }
-    
-    // Update using the found order's actual database id
-    const actualDbId = foundOrders[0].id;
-    console.log('📝 Found order. DB ID:', actualDbId);
-    
-    const { data: updated, error: updateError } = await supabase
-      .from('orders')
-      .update({ status })
-      .eq('id', actualDbId)
-      .select()
-      .single();
-    
-    if (updateError) {
-      console.error('❌ Update error:', updateError);
-      throw updateError;
-    }
-    
-    console.log('✅ Order status updated successfully');
-    return this._mapOrderFromDB(updated);
+  // Admin: «Jo'natildi» / «Yetkazildi». The database allows only
+  // approved → shipped → delivered and refuses when the order is no longer in
+  // `expected` (admin_set_order_status). Returns { result, status, ... }:
+  // ok / already / status_changed / not_allowed / not_found / forbidden.
+  async setStatus(ref, expected, status) {
+    const { data, error } = await supabase.rpc('admin_set_order_status', {
+      p_ref: String(ref), p_expected: expected ?? null, p_status: status
+    });
+    if (error) throw error;
+    return data;
   },
 
   // Delete order

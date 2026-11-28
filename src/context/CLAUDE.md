@@ -28,7 +28,7 @@ Central data store. **Two-phase loading**:
 
 Key methods:
 - `addOrder(order)` — create order (used by CheckoutPage)
-- `updateOrderStatus(id, status)` — triggers inventory + bonus + Telegram notification side effects
+- `updateOrderStatus(id, status)` — «Jo'natildi»/«Yetkazildi» only (approved → shipped → delivered), checked by the database via `admin_set_order_status` with the status the list shows; throws `.code` (`not_allowed` / `status_changed`) when refused; notifies the customer once. Payment, rejection and refunds use their own operations (`approveOrder`, `rejectOrder`, Payme, `confirmReturn`)
 - `updateUserBonusPoints(userId, delta)` — delta is positive (add) or negative (deduct)
 - `refreshUsers()` — reload users from DB
 - Category reordering: persisted to localStorage
