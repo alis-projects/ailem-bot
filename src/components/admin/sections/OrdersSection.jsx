@@ -8,13 +8,14 @@ import { useToast } from '../../../context/ToastContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { formatPrice, formatDate, getStatusLabel } from '../../../utils/helpers';
 import { inTashkentDayRange, orderMatchesSearch } from '../../../utils/orderFilters';
+import { NO_DATA, paymentInfo, deliveryInfo, bonusSummary, orderTimeline } from '../../../utils/orderCard';
 import { exportOrders, exportOrderItems } from '../../../utils/csvExport';
 import { notifyReferrerReward } from '../../../services/telegram';
 import { printShippingLabel, printMultipleLabels } from '../../../utils/shippingLabel';
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
 
 const OrdersSection = ({ onImageClick }) => {
-  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn, getBonusRecords } = useContext(AdminContext);
+  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn, getBonusRecords, getOrderEvents } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState('all');
@@ -32,6 +33,21 @@ const OrdersSection = ({ onImageClick }) => {
       .catch(e => console.error('Failed to load bonus history:', e));
     return () => { alive = false; };
   }, [selectedOrder?.dbId, selectedOrder?.refundedAt, getBonusRecords]);
+
+  // Recorded status changes of the open order («Holatlar tarixi»)
+  const [statusEvents, setStatusEvents] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setStatusEvents(null);
+    if (!selectedOrder || !getOrderEvents) return undefined;
+    getOrderEvents(selectedOrder)
+      .then(r => { if (alive) setStatusEvents(r); })
+      .catch(e => { console.error('Failed to load status history:', e); if (alive) setStatusEvents([]); });
+    return () => { alive = false; };
+  }, [selectedOrder?.dbId, selectedOrder?.status, getOrderEvents]);
+
+  // Tashkent time for the card
+  const tashkentTime = (t) => new Date(t).toLocaleString('ru-RU', { timeZone: 'Asia/Tashkent', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const [selectedOrders, setSelectedOrders] = useState([]);
   const [bulkAction, setBulkAction] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -749,36 +765,52 @@ const OrdersSection = ({ onImageClick }) => {
                 </div>
               </div>
 
-              {/* Delivery Information */}
-              {selectedOrder.deliveryInfo && (
+              {/* Delivery Information (always: «ma'lumot yo'q» when nothing was recorded) */}
+              {(
                 <div>
                   <h4 className="font-semibold text-lg mb-3 flex items-center gap-2" style={{ color: 'var(--text)' }}>
                     <Truck className="w-5 h-5" style={{ color: 'var(--text-2)' }} />
                     Yetkazib berish tafsilotlari
                   </h4>
-                  <div className="rounded-lg p-4 space-y-2" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                    {selectedOrder.deliveryInfo.fullName && (
+                  <div className="rounded-lg p-4 space-y-2" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }} data-testid="card-delivery">
+                    {(() => {
+                      const dlv = deliveryInfo(selectedOrder);
+                      return (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-sm a-muted">Yetkazib berish turi:</span>
+                            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{dlv.kind}</span>
+                          </div>
+                          {dlv.lines.map(([k, v]) => (
+                            <div key={k} className="flex justify-between gap-3">
+                              <span className="text-sm a-muted">{k}:</span>
+                              <span className="text-sm font-medium text-right" style={{ color: v === NO_DATA ? 'var(--text-3)' : 'var(--text)' }}>{v}</span>
+                            </div>
+                          ))}
+                          {dlv.postpaid && (
+                            <div className="text-sm font-medium" data-testid="bts-postpaid" style={{ color: 'var(--warn)' }}>
+                              Yetkazib berish narxi qabul qilishda to'lanadi (BTS)
+                            </div>
+                          )}
+                          {dlv.postpaidUnknown && (
+                            <div className="flex justify-between">
+                              <span className="text-sm a-muted">Yetkazib berish to'lovi:</span>
+                              <span className="text-sm font-medium" style={{ color: 'var(--text-3)' }}>{NO_DATA} (eski buyurtma)</span>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                    {selectedOrder.deliveryInfo?.fullName && (
                       <div className="flex justify-between">
                         <span className="text-sm a-muted">Qabul qiluvchi:</span>
-                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo.fullName}</span>
+                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo?.fullName}</span>
                       </div>
                     )}
-                    {selectedOrder.deliveryInfo.phone && (
+                    {selectedOrder.deliveryInfo?.phone && (
                       <div className="flex justify-between">
                         <span className="text-sm a-muted">Aloqa:</span>
-                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo.phone}</span>
-                      </div>
-                    )}
-                    {selectedOrder.deliveryInfo.city && (
-                      <div className="flex justify-between">
-                        <span className="text-sm a-muted">Shahar:</span>
-                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo.city}</span>
-                      </div>
-                    )}
-                    {selectedOrder.deliveryInfo.address && (
-                      <div>
-                        <span className="text-sm a-muted block mb-1">Manzil:</span>
-                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo.address}</span>
+                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>{selectedOrder.deliveryInfo?.phone}</span>
                       </div>
                     )}
                     {selectedOrder.courier && (
@@ -805,6 +837,86 @@ const OrdersSection = ({ onImageClick }) => {
                 </div>
               )}
 
+
+              {/* Payment */}
+              {(() => {
+                const pay = paymentInfo(selectedOrder);
+                const row = (label, value, extra) => (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-sm a-muted">{label}:</span>
+                    <span className="text-sm font-medium text-right" style={{ color: value === NO_DATA ? 'var(--text-3)' : 'var(--text)' }}>{value}{extra}</span>
+                  </div>
+                );
+                return (
+                  <div data-testid="card-payment">
+                    <h4 className="font-semibold text-lg mb-3" style={{ color: 'var(--text)' }}>To'lov</h4>
+                    <div className="rounded-lg p-4 space-y-2" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                      {row("To'lov usuli", pay.label)}
+                      {pay.paymeTransaction && row('Payme tranzaksiyasi', pay.paymeTransaction)}
+                      {pay.paymeState && row('Payme holati', pay.paymeState)}
+                      {row("To'lov tasdiqlangan", pay.paidAt ? `${tashkentTime(pay.paidAt)} (${pay.paidBy})` : NO_DATA)}
+                      {pay.adminApprovedAt && row('Admin tasdiqlagan', tashkentTime(pay.adminApprovedAt), " — bu to'lov tasdig'i emas")}
+                      {pay.screenshot && (
+                        <div className="flex justify-between">
+                          <span className="text-sm a-muted">To'lov cheki:</span>
+                          <a className="text-sm font-medium" href={pay.screenshot} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-ink)' }}>Ochish</a>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Bonuses (from the bonus history) */}
+              {(() => {
+                if (!bonusRecords) return null;
+                const b = bonusSummary(selectedOrder, bonusRecords);
+                const v = (n) => (b.covered ? `${n} ball` : NO_DATA);
+                const row = (label, n) => (
+                  <div className="flex justify-between">
+                    <span className="text-sm a-muted">{label}:</span>
+                    <span className="text-sm font-medium a-num" style={{ color: b.covered ? 'var(--text)' : 'var(--text-3)' }}>{v(n)}</span>
+                  </div>
+                );
+                return (
+                  <div data-testid="card-bonuses">
+                    <h4 className="font-semibold text-lg mb-3" style={{ color: 'var(--text)' }}>Bonuslar (bonus tarixi bo'yicha)</h4>
+                    <div className="rounded-lg p-4 space-y-2" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                      {row('Ishlatilgan', b.used)}
+                      {row('Qaytarilgan', b.returned)}
+                      {row('Hisoblangan', b.earned)}
+                      {b.covered && b.earnedToDebt > 0 && (
+                        <div className="text-xs a-muted text-right">shundan {b.earnedToDebt} ball bonus qarzini to'lashga ketgan</div>
+                      )}
+                      {b.covered && b.revoked > 0 && row('Bekor qilingan (qaytarish)', b.revoked)}
+                      {b.covered && b.commission > 0 && row('Taklif qilgan mijozga', b.commission)}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Status history: recorded events only */}
+              {(() => {
+                if (statusEvents === null) return null;
+                const items = orderTimeline(selectedOrder, statusEvents);
+                const changes = (statusEvents || []).filter(e => e.from_status).length;
+                return (
+                  <div data-testid="card-history">
+                    <h4 className="font-semibold text-lg mb-3" style={{ color: 'var(--text)' }}>Holatlar tarixi</h4>
+                    <div className="rounded-lg p-4 space-y-1" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                      {items.map((it, i) => (
+                        <div key={i} className="flex justify-between gap-3 text-sm">
+                          <span style={{ color: 'var(--text)' }}>{it.text}</span>
+                          <span className="a-muted a-num whitespace-nowrap">{tashkentTime(it.at)}</span>
+                        </div>
+                      ))}
+                      {changes === 0 && (
+                        <div className="text-xs a-muted">Holat o'zgarishlari: {NO_DATA} (faqat yozilgan hodisalar ko'rsatiladi)</div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Order Items */}
               <div>

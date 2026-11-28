@@ -1236,7 +1236,22 @@ export const ordersAPI = {
       const res = await supabase.from('orders').select('id, order_number').in('id', orderIds);
       numbers = Object.fromEntries((res.data || []).map(o => [o.id, o.order_number]));
     }
-    return { history: history || [], debts: debts.map(d => ({ ...d, orderNumber: numbers[d.order_id] || d.order_id })) };
+    // when the bonus history started (orders older than this have no history)
+    let historyStart = null;
+    const { data: first } = await supabase.from('bonus_history').select('created_at').order('created_at', { ascending: true }).limit(1);
+    if (first && first[0]) historyStart = first[0].created_at;
+    return { history: history || [], debts: debts.map(d => ({ ...d, orderNumber: numbers[d.order_id] || d.order_id })), historyStart };
+  },
+
+  // Recorded status changes of one order (order_status_events) — admins only
+  async getStatusEvents(orderDbId) {
+    const { data, error } = await supabase
+      .from('order_status_events')
+      .select('from_status, to_status, at, actor')
+      .eq('order_id', String(orderDbId))
+      .order('at');
+    if (error) throw error;
+    return data || [];
   },
 
   async confirmReturn(ref) {
