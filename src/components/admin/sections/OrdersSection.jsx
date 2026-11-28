@@ -1,4 +1,4 @@
-import { useState, useContext, useMemo } from 'react';
+import { useState, useContext, useMemo, useEffect } from 'react';
 import {
   X, Users as UsersIcon, Truck, ShoppingBag, DollarSign,
   Download, FileDown, RotateCw, Package, Printer
@@ -13,12 +13,24 @@ import { printShippingLabel, printMultipleLabels } from '../../../utils/shipping
 import { printPackingSlip, printMultiplePackingSlips } from '../../../utils/packingSlip';
 
 const OrdersSection = ({ onImageClick }) => {
-  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData } = useContext(AdminContext);
+  const { orders, approveOrder, rejectOrder, updateOrderStatus, loadAllData, confirmReturn, getBonusRecords } = useContext(AdminContext);
   const toast = useToast();
   const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all', 'online', 'cash'
   const [selectedOrder, setSelectedOrder] = useState(null);
+  const [bonusRecords, setBonusRecords] = useState(null);
+
+  // Bonus history of the open order (accruals, debt repayments, refunds, debts)
+  useEffect(() => {
+    let alive = true;
+    setBonusRecords(null);
+    if (!selectedOrder || !getBonusRecords) return undefined;
+    getBonusRecords(selectedOrder)
+      .then(r => { if (alive) setBonusRecords(r); })
+      .catch(e => console.error('Failed to load bonus history:', e));
+    return () => { alive = false; };
+  }, [selectedOrder?.dbId, selectedOrder?.refundedAt, getBonusRecords]);
   const [selectedOrders, setSelectedOrders] = useState([]);
   const [bulkAction, setBulkAction] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -57,6 +69,7 @@ const OrdersSection = ({ onImageClick }) => {
     if (s === 'approved' || s === 'delivered' || s === 'completed') return 'a-pill-ok';
     if (s === 'pending') return 'a-pill-warn';
     if (s === 'rejected') return 'a-pill-danger';
+    if (s === 'return_pending') return 'a-pill-warn';
     return 'a-pill-info';
   };
 
@@ -190,6 +203,29 @@ const OrdersSection = ({ onImageClick }) => {
         console.error('❌ Failed to mark as delivered:', error);
         toast.error('Holatni yangilashda xatolik. Qayta urinib ko\'ring.');
       }
+    }
+  };
+
+  // Refunded after shipping: the goods came back → stock, once
+  const handleConfirmReturn = async (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    const confirmed = await confirm({
+      title: 'Qaytgan mahsulotni qabul qilish',
+      message: "Pul Payme orqali qaytarilgan. Mahsulot sizga qaytib keldimi? Tasdiqlasangiz, buyurtmadagi mahsulotlar omborga qaytariladi (bir marta).",
+      type: 'warning',
+      confirmText: 'Qabul qilindi',
+      cancelText: 'Bekor qilish'
+    });
+    if (!confirmed) return;
+    try {
+      const result = await confirmReturn(orderId);
+      toast.success(result?.result === 'already_received' ? 'Mahsulot allaqachon qabul qilingan' : 'Mahsulot omborga qaytarildi');
+    } catch (error) {
+      console.error('❌ Failed to confirm return:', error);
+      toast.error(error?.code === 'not_awaiting_return'
+        ? `Buyurtma holati: ${getStatusLabel(error.status)}. Qaytarish kutilmayapti.`
+        : "Qabul qilishda xatolik. Qayta urinib ko'ring.");
     }
   };
 
@@ -376,6 +412,8 @@ const OrdersSection = ({ onImageClick }) => {
             <option value="delivered">Yetkazilgan ({orders.filter(o => o.status === 'delivered').length})</option>
             <option value="completed">Bajarilgan ({orders.filter(o => o.status === 'completed').length})</option>
             <option value="rejected">Rad etilgan ({orders.filter(o => o.status === 'rejected').length})</option>
+            <option value="return_pending">Qaytarish kutilmoqda ({orders.filter(o => o.status === 'return_pending').length})</option>
+            <option value="refunded">Qaytarilgan ({orders.filter(o => o.status === 'refunded').length})</option>
           </select>
         </div>
       </div>
@@ -554,6 +592,9 @@ const OrdersSection = ({ onImageClick }) => {
                     <span className={`a-pill ${pillClass(order.status)}`}>
                       {getStatusLabel(order.status)}
                     </span>
+                    {order.refund?.needs_reconciliation && (
+                      <span className="a-pill a-pill-danger ml-1">Sverka talab qilinadi</span>
+                    )}
                   </td>
                   <td>
                     <div className="flex gap-2 flex-wrap items-center">
@@ -608,6 +649,15 @@ const OrdersSection = ({ onImageClick }) => {
                             Jo'natildi
                           </button>
                         </>
+                      )}
+                      {order.status === 'return_pending' && (
+                        <button
+                          onClick={() => handleConfirmReturn(order.id)}
+                          className="font-medium whitespace-nowrap"
+                          style={{ color: 'var(--warn)' }}
+                        >
+                          Qabul qilindi
+                        </button>
                       )}
                       {order.status === 'shipped' && (
                         <>
@@ -807,6 +857,80 @@ const OrdersSection = ({ onImageClick }) => {
                       <span className="text-lg font-bold a-num" style={{ color: 'var(--accent-ink)' }}>{formatPrice(selectedOrder.total)}</span>
                     </div>
                   </div>
+
+                  {selectedOrder.refundedAt && (
+                    <div role="note" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)' }}>
+                      <div className="font-medium" style={{ color: 'var(--text)' }}>
+                        Pul qaytarilgan ({selectedOrder.refund?.source?.startsWith('payme:') ? 'Payme' : selectedOrder.refund?.source || '—'}), {formatDate(selectedOrder.refundedAt)}
+                      </div>
+                      <div className="a-muted">
+                        Ombor: {selectedOrder.refund?.stock === 'returned'
+                          ? 'mahsulot qaytarildi'
+                          : selectedOrder.refund?.stock === 'awaiting_return'
+                          ? "mahsulot qaytib kelishi kutilmoqda — kelganda «Qabul qilindi» ni bosing"
+                          : "o'zgartirilmadi (buyurtma tizimda yakunlanmagan edi)"}
+                      </div>
+                      <div className="a-muted">
+                        Bonus: {selectedOrder.refund?.bonus_returned || 0} ball qaytarildi, {selectedOrder.refund?.bonus_revoked || 0} ball bekor qilindi
+                      </div>
+                      {selectedOrder.refund?.needs_reconciliation && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          <div className="font-medium">Sverka talab qilinadi</div>
+                          {(selectedOrder.refund.reconcile || []).map((r) => (
+                            <div key={r}>
+                              {r === 'bonus_earned_unrecorded'
+                                ? "Xarid uchun berilgan bonus miqdori operatsiyalar tarixida yo'q — mijoz va taklif qilgan mijoz balansi o'zgartirilmadi."
+                                : r === 'bonus_used_unconfirmed'
+                                ? `Buyurtmada ishlatilgan ${selectedOrder.bonusPointsUsed || 0} ball tarixda tasdiqlanmagan — qaytarilmadi.`
+                                : r === 'not_fulfilled'
+                                ? "Buyurtma tizimda yakunlanmagan — ombor va bonuslar o'zgartirilmadi."
+                                : r}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {selectedOrder.refund?.bonus_shortfall > 0 && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          Mijoz {selectedOrder.refund.bonus_shortfall} ball bonusni allaqachon sarflagan — bonus qarzi sifatida yozildi, keyingi bonuslardan avtomatik to'lanadi.
+                        </div>
+                      )}
+                      {selectedOrder.refund?.referrer_revoked > 0 && (
+                        <div className="a-muted">Taklif qilgan mijozdan {selectedOrder.refund.referrer_revoked} ball bekor qilindi</div>
+                      )}
+                      {selectedOrder.refund?.referrer_shortfall > 0 && (
+                        <div style={{ color: 'var(--danger)' }}>
+                          Taklif qilgan mijoz {selectedOrder.refund.referrer_shortfall} ball bonusni allaqachon sarflagan — bonus qarzi sifatida yozildi.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {bonusRecords?.history?.length > 0 && (
+                    <div role="group" aria-label="Bonus tarixi" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)' }}>
+                      <div className="font-medium" style={{ color: 'var(--text)' }}>Bonus tarixi</div>
+                      {bonusRecords.history.map((h) => {
+                        const debt = bonusRecords.debts.find(d => d.id === h.debt_id);
+                        const isBuyer = debt ? debt.role === 'buyer' : String(h.user_id) === String(selectedOrder.userId);
+                        const who = isBuyer ? 'Mijoz' : 'Taklif qilgan mijoz';
+                        const ref = debt ? ` (qarz #${debt.orderNumber}, qoldi ${h.debt_remaining_after ?? debt.remaining} ball)` : '';
+                        const text = {
+                          earned: `Mijozga bonus: +${h.amount} ball`,
+                          commission: `Taklif qilgan mijozga komissiya: +${h.amount} ball`,
+                          debt_repaid: `${who}: ${h.amount} ball bonus qarzini to'lashga ketdi${ref}`,
+                          refund_returned: `Mijozga ishlatilgan ${h.amount} ball qaytarildi`,
+                          bonus_reserved: `Buyurtmada ishlatish uchun ${h.amount} ball band qilindi`,
+                          reservation_released: `Band qilingan ${h.amount} ball qaytarildi (buyurtma bekor qilindi)`,
+                          refund_revoked: `${isBuyer ? 'Mijozdan' : 'Taklif qilgan mijozdan'} ${h.amount} ball bekor qilindi`,
+                          debt_created: `${who}: ${h.amount} ball bonus qarzi yozildi${debt ? ` (hozir qoldi ${debt.remaining} ball)` : ''}`,
+                          debt_restored: `${who}: ${h.amount} ball qarzga qaytarildi — bu buyurtma bonusi bilan to'langan edi${ref}`
+                        }[h.kind] || `${h.kind}: ${h.amount}`;
+                        const danger = h.kind === 'debt_created' || h.kind === 'debt_restored';
+                        return (
+                          <div key={h.id} className={danger ? '' : 'a-muted'} style={danger ? { color: 'var(--danger)' } : undefined}>{text}</div>
+                        );
+                      })}
+                    </div>
+                  )}
 
                   {needsPaymeReview(selectedOrder) && (
                     <div role="alert" className="pt-2 mt-2 text-sm space-y-1" style={{ borderTop: '1px solid var(--border-strong)', color: 'var(--danger)' }}>

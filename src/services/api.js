@@ -1006,6 +1006,11 @@ export const ordersAPI = {
       deliveryFee: order.delivery_fee,
       paymeOrderId: order.payme_order_id,
       paymeTransactionId: order.payme_transaction_id,
+      paymeState: order.payme_state ?? null,
+      // Refund of a paid order (add-payme-refund.sql)
+      refundedAt: order.refunded_at || null,
+      refund: order.refund || null,
+      returnReceivedAt: order.return_received_at || null,
       // Set by reconcile_payment_reservations(): check this order in the
       // Payme merchant cabinet (stock and bonus stay reserved until then)
       paymeReviewRequiredAt: order.payme_review_required_at || null,
@@ -1203,6 +1208,39 @@ export const ordersAPI = {
   // orders that were already processed. Returns the function result object.
   async rejectAsAdmin(ref) {
     const { data, error } = await supabase.rpc('admin_reject_order', { p_ref: String(ref) });
+    if (error) throw error;
+    return data;
+  },
+
+  // The goods of a refunded, already shipped order came back: return them to
+  // stock once (admin_confirm_return, add-payme-refund.sql). Returns the result.
+  // Bonus operations of one order (bonus_history) and the debts they touch
+  // (bonus_debts) — admins only (RLS)
+  async getBonusRecords(orderDbId) {
+    const { data: history, error } = await supabase
+      .from('bonus_history')
+      .select('id, user_id, kind, amount, debt_id, balance_after, debt_remaining_after, created_at')
+      .eq('order_id', String(orderDbId))
+      .order('id');
+    if (error) throw error;
+    const debtIds = [...new Set((history || []).map(h => h.debt_id).filter(Boolean))];
+    let debts = [];
+    if (debtIds.length) {
+      const res = await supabase.from('bonus_debts').select('id, user_id, order_id, role, amount, remaining, created_at').in('id', debtIds);
+      if (res.error) throw res.error;
+      debts = res.data || [];
+    }
+    const orderIds = [...new Set(debts.map(d => d.order_id))];
+    let numbers = {};
+    if (orderIds.length) {
+      const res = await supabase.from('orders').select('id, order_number').in('id', orderIds);
+      numbers = Object.fromEntries((res.data || []).map(o => [o.id, o.order_number]));
+    }
+    return { history: history || [], debts: debts.map(d => ({ ...d, orderNumber: numbers[d.order_id] || d.order_id })) };
+  },
+
+  async confirmReturn(ref) {
+    const { data, error } = await supabase.rpc('admin_confirm_return', { p_ref: String(ref) });
     if (error) throw error;
     return data;
   },

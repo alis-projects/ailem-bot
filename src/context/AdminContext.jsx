@@ -365,6 +365,45 @@ export const AdminProvider = ({ children }) => {
     }
   };
 
+  // Returned goods of a refunded order were received: back to stock once
+  // (admin_confirm_return). Throws with .code 'not_awaiting_return' /
+  // 'not_found' when nothing changed; 'already_received' is not an error.
+  // Bonus history / debts of one order, for the order card
+  const getBonusRecords = async (order) => ordersAPI.getBonusRecords(order?.dbId || order?.id);
+
+  const confirmReturn = async (orderId) => {
+    const order = orders.find(o => o.id === orderId || o.dbId === orderId);
+    const result = await ordersAPI.confirmReturn(order?.dbId || orderId);
+    if (result?.result !== 'received' && result?.result !== 'already_received') {
+      const err = new Error(`confirm_return_${result?.result || 'failed'}`);
+      err.code = result?.result || 'failed';
+      err.status = result?.status;
+      throw err;
+    }
+    try {
+      const fresh = await ordersAPI.getById(order?.dbId || orderId);
+      setOrders(prev => prev.map(o => (o.id === orderId || o.dbId === orderId) ? fresh : o));
+    } catch (e) {
+      console.error('Failed to reload order after return:', e);
+    }
+    try {
+      await refreshCatalog();
+    } catch (e) {
+      console.error('Failed to reload products after return:', e);
+    }
+    if (result.result === 'received') {
+      logAuditAction({
+        action: AUDIT_ACTIONS.ORDER_RETURN_RECEIVED,
+        entityType: 'order',
+        entityId: order?.dbId || orderId,
+        oldData: { status: 'return_pending' },
+        newData: { status: 'refunded', stock: 'returned' },
+        metadata: { order_number: order?.orderNumber || orderId }
+      });
+    }
+    return result;
+  };
+
   const deleteOrder = async (orderId) => {
     try {
       await ordersAPI.delete(orderId);
@@ -702,6 +741,8 @@ export const AdminProvider = ({ children }) => {
     updateOrderStatus,
     approveOrder,
     rejectOrder,
+    confirmReturn,
+    getBonusRecords,
     deleteOrder,
     reviews,
     addReview,

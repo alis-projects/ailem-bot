@@ -18,6 +18,7 @@ export const AUDIT_ACTIONS = {
   // Order actions
   ORDER_APPROVE: 'order.approve',
   ORDER_REJECT: 'order.reject',
+  ORDER_RETURN_RECEIVED: 'order.return_received',
   ORDER_SHIP: 'order.ship',
   ORDER_DELIVER: 'order.deliver',
   ORDER_BULK_ACTION: 'order.bulk_action',
@@ -193,6 +194,7 @@ export const formatAuditAction = (action) => {
     [AUDIT_ACTIONS.PRODUCT_PUBLISH]: 'Published product',
     [AUDIT_ACTIONS.ORDER_APPROVE]: 'Approved order',
     [AUDIT_ACTIONS.ORDER_REJECT]: 'Rejected order',
+    [AUDIT_ACTIONS.ORDER_RETURN_RECEIVED]: 'Received returned goods',
     [AUDIT_ACTIONS.ORDER_SHIP]: 'Marked order as shipped',
     [AUDIT_ACTIONS.ORDER_DELIVER]: 'Marked order as delivered',
     [AUDIT_ACTIONS.ORDER_BULK_ACTION]: 'Bulk order action',

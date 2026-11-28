@@ -175,7 +175,9 @@ export const getStatusColor = (status) => {
     approved: 'bg-success text-white',
     rejected: 'bg-error text-white',
     shipped: 'bg-accent text-white',
-    delivered: 'bg-primary text-white'
+    delivered: 'bg-primary text-white',
+    refunded: 'bg-gray-600 text-white',
+    return_pending: 'bg-gray-600 text-white'
   };
   return colors[status.toLowerCase()] || 'bg-gray-500 text-white';
 };
@@ -228,7 +230,10 @@ export const getStatusLabel = (status) => {
     rejected: 'Rad etilgan',
     shipped: 'Jo\'natilgan',
     delivered: 'Yetkazilgan',
-    completed: 'Bajarilgan'
+    completed: 'Bajarilgan',
+    // Payme refund of a paid order (add-payme-refund.sql)
+    refunded: 'Qaytarilgan',
+    return_pending: 'Qaytarish kutilmoqda'
   };
   return labels[String(status).toLowerCase()] || status;
 };

@@ -428,10 +428,12 @@ async function performTransaction(params, requestId) {
 }
 
 // Cancel is decided atomically in the database (payme_cancel_transaction,
-// supabase-migrations/add-admin-approve-order.sql): a late cancel of an
-// unperformed transaction never turns an order that was already processed
-// another way (e.g. approved by an admin) into 'rejected'; repeated cancels
-// return the stored cancel time.
+// supabase-migrations/add-admin-approve-order.sql + add-payme-refund.sql):
+//   * unperformed (state 1): the order is rejected, unless it was already
+//     processed another way; state -1
+//   * performed (state 2) = a refund: stock (if not shipped yet) and bonuses
+//     are returned once, status 'refunded' / 'return_pending'; state -2
+// Repeated cancels return the stored state and time, nothing changes.
 async function cancelTransaction(params, requestId) {
   const { id, reason } = params;
   const cancelTime = Date.now();
@@ -448,6 +450,11 @@ async function cancelTransaction(params, requestId) {
       id: requestId,
       error: { code: -31008, message: 'Unable to cancel transaction' },
     });
+  }
+
+  // A refund of a paid order: tell the admin (goods to take back, bonuses)
+  if (data?.result === 'cancelled' && Number(data.state) === -2) {
+    notifyAdminRefund(id, data).catch((e) => console.error('Refund notification failed:', e));
   }
 
   // Unknown transaction: answered as before (no order changed)
@@ -489,4 +496,28 @@ async function checkTransaction(params, requestId) {
       reason: order.payme_cancel_reason || null,
     },
   });
+}
+
+async function notifyAdminRefund(transactionId, data) {
+  const { adminChatId: ADMIN_CHAT_ID } = getTelegramConfig();
+  if (!ADMIN_CHAT_ID) return;
+  const { data: order } = await getSupabase()
+    .from('orders')
+    .select('order_number, total, status, refund')
+    .eq('payme_transaction_id', String(transactionId))
+    .maybeSingle();
+  if (!order) return;
+  const r = order.refund || {};
+  const lines = [
+    `↩️ <b>Payme orqali pul qaytarildi</b>`,
+    `Buyurtma: <b>#${order.order_number}</b>, ${Number(order.total).toLocaleString()} UZS`,
+    order.status === 'return_pending'
+      ? `📦 Mahsulot jo'natilgan: qaytib kelganda admin panelda «Qabul qilindi» ni bosing (ombor shundan keyin to'ldiriladi).`
+      : r.stock === 'returned'
+      ? `📦 Mahsulot omborga qaytarildi.`
+      : `📦 Ombor o'zgartirilmadi.`,
+    `🎁 Bonus: ${r.bonus_returned || 0} qaytarildi, ${r.bonus_revoked || 0} bekor qilindi${r.bonus_shortfall ? `, ${r.bonus_shortfall} allaqachon sarflangan — bonus qarzi yozildi` : ''}${r.bonus_debt_restored ? `, ${r.bonus_debt_restored} eski qarzga qaytarildi` : ''}.`
+  ];
+  if (r.needs_reconciliation) lines.push(`⚠️ <b>Sverka talab qilinadi</b>: bonus miqdori tarixda tasdiqlanmagan, balans o'zgartirilmadi.`);
+  await sendTelegramNotification(ADMIN_CHAT_ID, lines.join('\n'));
 }

@@ -16,6 +16,7 @@ const UsersSection = () => {
   const [updatingRole, setUpdatingRole] = useState(null);
   const [bonusEditUser, setBonusEditUser] = useState(null);
   const [bonusAmount, setBonusAmount] = useState('');
+  const [bonusReason, setBonusReason] = useState('');
   const [updatingBonus, setUpdatingBonus] = useState(false);
 
   const filteredUsers = users.filter(user => {
@@ -75,6 +76,11 @@ const UsersSection = () => {
     }
     const user = users.find(u => u.id === userId);
     if (!user) return;
+    const reason = bonusReason.trim();
+    if (reason.length < 3) {
+      toast.error("Sababini yozing (kamida 3 belgi)");
+      return;
+    }
 
     const actualDelta = delta === 'add' ? amount : -amount;
     const currentPoints = user.bonusPoints || 0;
@@ -85,15 +91,17 @@ const UsersSection = () => {
 
     setUpdatingBonus(true);
     try {
-      await updateUserBonusPoints(userId, actualDelta);
+      await updateUserBonusPoints(userId, actualDelta, reason);
       toast.success(`${user.name}: ${delta === 'add' ? '+' : '-'}${amount} ball`);
       setBonusEditUser(null);
       setBonusAmount('');
+      setBonusReason('');
     } catch (error) {
       console.error('Failed to update bonus points:', error);
       toast.error(
         error?.code === 'insufficient' ? `Foydalanuvchida faqat ${error.old ?? 0} ball bor`
           : error?.code === 'forbidden' ? "Bonusni o'zgartirishga ruxsat yo'q"
+          : error?.code === 'reason_required' ? "Sababini yozing (kamida 3 belgi)"
           : 'Ballni yangilashda xatolik'
       );
     } finally {
@@ -224,6 +232,7 @@ const UsersSection = () => {
                           onClick={() => {
                             setBonusEditUser(bonusEditUser === user.id ? null : user.id);
                             setBonusAmount('');
+                            setBonusReason('');
                           }}
                           className="a-num cursor-pointer"
                           style={{ fontSize: 20, fontWeight: 700, color: 'var(--info)' }}
@@ -233,7 +242,18 @@ const UsersSection = () => {
                         </button>
                       </div>
                       {bonusEditUser === user.id && (
-                        <div className="flex items-center gap-1 mt-1">
+                        <div className="mt-1 flex flex-col items-end gap-1">
+                        <input
+                          type="text"
+                          value={bonusReason}
+                          onChange={(e) => setBonusReason(e.target.value)}
+                          placeholder="Sabab (majburiy)"
+                          aria-label="Bonus o'zgartirish sababi"
+                          maxLength={500}
+                          className="a-input"
+                          style={{ width: 200, padding: '4px 8px' }}
+                        />
+                        <div className="flex items-center gap-1">
                           <input
                             type="number"
                             min="1"
@@ -262,6 +282,7 @@ const UsersSection = () => {
                           >
                             <Minus className="w-4 h-4" />
                           </button>
+                        </div>
                         </div>
                       )}
                     </div>
