@@ -50,7 +50,20 @@ DO $$
 DECLARE
   v_fulfill text := md5(pg_get_functiondef('payment_internal.fulfill_order(text,text,boolean,boolean)'::regprocedure));
   v_cancel  text := md5(pg_get_functiondef('public.payme_cancel_transaction(text,bigint,integer)'::regprocedure));
+  v_adjust  text;
 BEGIN
+  -- secure-users.sql (PR #22) must be applied first: admin_adjust_bonus is replaced below
+  IF to_regprocedure('public.admin_adjust_bonus(uuid,integer,text)') IS NULL THEN
+    RAISE EXCEPTION 'add-payme-refund: apply secure-users.sql first (admin_adjust_bonus is missing)';
+  END IF;
+  v_adjust := md5(pg_get_functiondef('public.admin_adjust_bonus(uuid,integer,text)'::regprocedure));
+  IF v_adjust <> '0ebd87d37de473ae96c8206ac39b44df'
+     AND position('admin_credit' in pg_get_functiondef('public.admin_adjust_bonus(uuid,integer,text)'::regprocedure)) = 0 THEN
+    RAISE EXCEPTION 'add-payme-refund: public.admin_adjust_bonus is not the expected version (md5 %)', v_adjust;
+  END IF;
+  IF md5(pg_get_functiondef('public.orders_bonus_reservation_update()'::regprocedure)) <> '3079e7fba4785afedf9389944559ec13' THEN
+    RAISE EXCEPTION 'add-payme-refund: orders_bonus_reservation_update is not the expected version';
+  END IF;
   -- a repeated run of this file is recognised by its columns
   IF v_fulfill <> 'c2a8e2be73fc6d1aac8f065b8946396d'
      AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'bonus_earned') THEN
@@ -95,17 +108,42 @@ CREATE TABLE IF NOT EXISTS public.bonus_history (
   user_id uuid NOT NULL,
   order_id text,                          -- the order this operation belongs to
   debt_id uuid,
-  kind text NOT NULL CHECK (kind IN ('earned', 'commission', 'debt_repaid',
-    'refund_returned', 'refund_revoked', 'debt_created', 'debt_restored')),
+  kind text NOT NULL,
   amount integer NOT NULL CHECK (amount > 0),
   balance_after integer,
   debt_remaining_after integer,
   source text,
+  reason text,                            -- admin_credit / admin_debit: why
+  actor text,                             -- admin_credit / admin_debit: admin e-mail
   created_at timestamptz NOT NULL DEFAULT now()
 );
--- each operation at most once per order, user and debt
-CREATE UNIQUE INDEX IF NOT EXISTS bonus_history_once ON public.bonus_history
-  (kind, COALESCE(order_id, ''), user_id, COALESCE(debt_id, '00000000-0000-0000-0000-000000000000'::uuid));
+ALTER TABLE public.bonus_history ADD COLUMN IF NOT EXISTS reason text;
+ALTER TABLE public.bonus_history ADD COLUMN IF NOT EXISTS actor text;
+-- Kinds and their effect on the balance (amount is always positive):
+--   +  opening_balance   balance when the history started (once per user)
+--   +  earned            purchase bonus credited to the balance
+--   +  commission        referral commission credited to the balance
+--   +  refund_returned   bonus spent on a refunded order, returned
+--   +  reservation_released  bonus reserved at checkout, returned (order cancelled / expired)
+--   +  admin_credit      manual correction by an admin (reason required)
+--   -  bonus_reserved    bonus taken at checkout (reservation)
+--   -  refund_revoked    accrual of a refunded order taken back from the balance
+--   -  admin_debit       manual correction by an admin (reason required)
+--   0  debt_created / debt_repaid / debt_restored   move debt, not the balance
+ALTER TABLE public.bonus_history DROP CONSTRAINT IF EXISTS bonus_history_kind_check;
+ALTER TABLE public.bonus_history ADD CONSTRAINT bonus_history_kind_check CHECK (kind IN (
+  'opening_balance', 'earned', 'commission', 'refund_returned', 'reservation_released', 'admin_credit',
+  'bonus_reserved', 'refund_revoked', 'admin_debit',
+  'debt_created', 'debt_repaid', 'debt_restored'));
+ALTER TABLE public.bonus_history DROP CONSTRAINT IF EXISTS bonus_history_admin_reason;
+ALTER TABLE public.bonus_history ADD CONSTRAINT bonus_history_admin_reason
+  CHECK (kind NOT IN ('admin_credit', 'admin_debit') OR length(btrim(COALESCE(reason, ''))) >= 3);
+-- each automatic operation at most once per order, user and debt (manual
+-- corrections may repeat)
+DROP INDEX IF EXISTS public.bonus_history_once;
+CREATE UNIQUE INDEX bonus_history_once ON public.bonus_history
+  (kind, COALESCE(order_id, ''), user_id, COALESCE(debt_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  WHERE kind NOT IN ('admin_credit', 'admin_debit');
 CREATE INDEX IF NOT EXISTS bonus_history_order ON public.bonus_history (order_id);
 CREATE INDEX IF NOT EXISTS bonus_history_user ON public.bonus_history (user_id, created_at);
 
@@ -492,9 +530,137 @@ $$;
 REVOKE ALL ON FUNCTION public.admin_confirm_return(text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.admin_confirm_return(text) TO authenticated;
 
+
+-- 7. History of the checkout reservation and of its return
+--    (create_customer_order / orders_bonus_reservation_update change the
+--    balance; these AFTER triggers only record it, once per order)
+CREATE OR REPLACE FUNCTION public.orders_bonus_history_insert()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO public.bonus_history (user_id, order_id, kind, amount, balance_after, source)
+  SELECT NEW.user_id::uuid, NEW.id::text, 'bonus_reserved', NEW.bonus_reserved,
+         (SELECT COALESCE(bonus_points, 0) FROM public.users WHERE id = NEW.user_id::uuid), 'checkout'
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE FUNCTION public.orders_bonus_history_update()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO public.bonus_history (user_id, order_id, kind, amount, balance_after, source)
+  SELECT NEW.user_id::uuid, NEW.id::text, 'reservation_released', OLD.bonus_reserved,
+         (SELECT COALESCE(bonus_points, 0) FROM public.users WHERE id = NEW.user_id::uuid), 'status:' || NEW.status
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.orders_bonus_history_insert() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.orders_bonus_history_update() FROM PUBLIC, anon, authenticated;
+DROP TRIGGER IF EXISTS orders_bonus_history_insert ON public.orders;
+CREATE TRIGGER orders_bonus_history_insert AFTER INSERT ON public.orders
+  FOR EACH ROW
+  WHEN (NEW.bonus_reservation = 'held' AND NEW.bonus_reserved > 0
+        AND NEW.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+  EXECUTE FUNCTION public.orders_bonus_history_insert();
+DROP TRIGGER IF EXISTS orders_bonus_history_update ON public.orders;
+CREATE TRIGGER orders_bonus_history_update AFTER UPDATE ON public.orders
+  FOR EACH ROW
+  WHEN (OLD.bonus_reservation = 'held' AND NEW.bonus_reservation = 'released' AND OLD.bonus_reserved > 0
+        AND NEW.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+  EXECUTE FUNCTION public.orders_bonus_history_update();
+
+-- 8. Manual correction by an admin: reason required, recorded separately
+--    (admin_credit / admin_debit); it does NOT repay debts — only purchase
+--    bonuses and referral commissions do
+CREATE OR REPLACE FUNCTION public.admin_adjust_bonus(p_user_id uuid, p_delta integer, p_reason text DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  v_old integer;
+  v_new integer;
+  v_reason text := NULLIF(btrim(COALESCE(p_reason, '')), '');
+  v_actor text;
+BEGIN
+  IF NOT public.is_admin() THEN
+    RETURN jsonb_build_object('result', 'forbidden');
+  END IF;
+  IF p_delta IS NULL OR p_delta = 0 OR abs(p_delta) > 100000000 THEN
+    RETURN jsonb_build_object('result', 'bad_amount');
+  END IF;
+  IF v_reason IS NULL OR length(v_reason) < 3 THEN
+    RETURN jsonb_build_object('result', 'reason_required');
+  END IF;
+  v_reason := left(v_reason, 500);
+  SELECT COALESCE(bonus_points, 0) INTO v_old FROM public.users WHERE id = p_user_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('result', 'not_found');
+  END IF;
+  v_new := v_old + p_delta;
+  IF v_new < 0 THEN
+    RETURN jsonb_build_object('result', 'insufficient', 'old', v_old);
+  END IF;
+  UPDATE public.users SET bonus_points = v_new WHERE id = p_user_id;
+  SELECT NULLIF(btrim(u.email), '') INTO v_actor FROM auth.users u WHERE u.id = auth.uid();
+  INSERT INTO public.bonus_history (user_id, kind, amount, balance_after, source, reason, actor)
+  VALUES (p_user_id, CASE WHEN p_delta > 0 THEN 'admin_credit' ELSE 'admin_debit' END, abs(p_delta), v_new,
+          'admin_adjust_bonus', v_reason, v_actor);
+  -- admin_id / admin_email / created_at are stamped by audit_logs_stamp
+  INSERT INTO public.audit_logs (action, entity_type, entity_id, old_data, new_data, metadata)
+  VALUES ('user.bonus_adjust', 'user', p_user_id::text,
+    jsonb_build_object('bonus_points', v_old)::text,
+    jsonb_build_object('bonus_points', v_new)::text,
+    jsonb_build_object('delta', p_delta, 'reason', v_reason, 'via', 'admin_adjust_bonus')::text);
+  RETURN jsonb_build_object('result', 'ok', 'old', v_old, 'new', v_new);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.admin_adjust_bonus(uuid, integer, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_adjust_bonus(uuid, integer, text) TO authenticated;
+
+-- 9. Opening balance: the history starts with each customer's current balance
+--    (once; customers that already have history are skipped)
+INSERT INTO public.bonus_history (user_id, kind, amount, balance_after, source)
+SELECT u.id, 'opening_balance', u.bonus_points, u.bonus_points, 'add-payme-refund.sql'
+FROM public.users u
+WHERE COALESCE(u.bonus_points, 0) > 0
+  AND NOT EXISTS (SELECT 1 FROM public.bonus_history h WHERE h.user_id = u.id);
+
+-- 10. Reconciliation (admins): balance vs history, each debt vs its history.
+--     Returns only the rows that do NOT match (empty = all consistent).
+CREATE OR REPLACE FUNCTION public.admin_bonus_reconciliation()
+RETURNS TABLE (kind text, user_id uuid, debt_id uuid, actual integer, from_history integer)
+LANGUAGE sql SECURITY DEFINER STABLE SET search_path = public, pg_temp
+AS $$
+  WITH b AS (
+    SELECT h.user_id,
+           sum(CASE WHEN h.kind IN ('opening_balance','earned','commission','refund_returned','reservation_released','admin_credit') THEN h.amount
+                    WHEN h.kind IN ('bonus_reserved','refund_revoked','admin_debit') THEN -h.amount ELSE 0 END)::integer AS s
+    FROM public.bonus_history h GROUP BY h.user_id
+  ), d AS (
+    SELECT bd.id, bd.user_id, bd.remaining,
+           (bd.amount - COALESCE(sum(h.amount) FILTER (WHERE h.kind = 'debt_repaid'), 0)
+                      + COALESCE(sum(h.amount) FILTER (WHERE h.kind = 'debt_restored'), 0))::integer AS s
+    FROM public.bonus_debts bd LEFT JOIN public.bonus_history h ON h.debt_id = bd.id
+    GROUP BY bd.id, bd.user_id, bd.remaining, bd.amount
+  )
+  SELECT 'balance', u.id, NULL::uuid, COALESCE(u.bonus_points, 0), COALESCE(b.s, 0)
+  FROM public.users u LEFT JOIN b ON b.user_id = u.id
+  WHERE (public.is_admin() OR session_user IN ('postgres', 'supabase_admin')) AND COALESCE(u.bonus_points, 0) <> COALESCE(b.s, 0)
+  UNION ALL
+  SELECT 'debt', d.user_id, d.id, d.remaining, d.s FROM d
+  WHERE (public.is_admin() OR session_user IN ('postgres', 'supabase_admin')) AND d.remaining <> d.s;
+$$;
+REVOKE ALL ON FUNCTION public.admin_bonus_reconciliation() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_bonus_reconciliation() TO authenticated;
+
 COMMIT;
 
 -- POST-CHECK (read-only):
 --   SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'valid_status';              -- includes refunded, return_pending
 --   SELECT tgname, tgenabled FROM pg_trigger WHERE tgname = 'orders_refund_guard';                     -- O
 --   SELECT count(*) FROM orders WHERE status IN ('refunded', 'return_pending');                        -- 0 right after the release
+--   SELECT * FROM public.admin_bonus_reconciliation();                                                  -- 0 rows (balance = history, debt = history)
+--   SELECT count(*), sum(amount) FROM bonus_history WHERE kind = 'opening_balance';                     -- = customers with balance > 0, their total

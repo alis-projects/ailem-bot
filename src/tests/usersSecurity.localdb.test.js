@@ -110,7 +110,7 @@ describe.skipIf(!enabled)('users protection (local)', () => {
     expect((await admin.from('users').update({ role: 'customer' }).eq('id', A).select('role')).data).toEqual([{ role: 'customer' }]);
     const up = (await admin.rpc('admin_adjust_bonus', { p_user_id: A, p_delta: 500, p_reason: 'test' })).data;
     expect(up).toEqual({ result: 'ok', old: 1000, new: 1500 });
-    const down = (await admin.rpc('admin_adjust_bonus', { p_user_id: A, p_delta: -2000 })).data;
+    const down = (await admin.rpc('admin_adjust_bonus', { p_user_id: A, p_delta: -2000, p_reason: 'test debit' })).data;
     expect(down).toEqual({ result: 'insufficient', old: 1500 });
     expect(await bonus(A)).toBe(1500);
     const { data: logs } = await service.from('audit_logs').select('action, old_data, new_data, metadata, admin_email').eq('entity_id', String(A)).eq('action', 'user.bonus_adjust');

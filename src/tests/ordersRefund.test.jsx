@@ -107,7 +107,9 @@ describe('refund statuses', () => {
         { id: 4, user_id: 'u-buyer', kind: 'debt_restored', amount: 11000, debt_id: 'd1', debt_remaining_after: 11000 },
         { id: 5, user_id: 'u-buyer', kind: 'refund_revoked', amount: 1000 },
         { id: 6, user_id: 'u-buyer', kind: 'debt_created', amount: 3000, debt_id: 'd2', debt_remaining_after: 3000 },
-        { id: 7, user_id: 'u-ref', kind: 'refund_revoked', amount: 1000 }
+        { id: 7, user_id: 'u-ref', kind: 'refund_revoked', amount: 1000 },
+        { id: 8, user_id: 'u-buyer', kind: 'bonus_reserved', amount: 2000 },
+        { id: 9, user_id: 'u-buyer', kind: 'reservation_released', amount: 2000 }
       ],
       debts: [
         { id: 'd1', role: 'buyer', amount: 11000, remaining: 11000, orderNumber: 'ORD-D' },
@@ -127,6 +129,8 @@ describe('refund statuses', () => {
     expect(text).toContain('Mijozdan 1000 ball bekor qilindi');
     expect(text).toContain('Mijoz: 3000 ball bonus qarzi yozildi (hozir qoldi 3000 ball)');
     expect(text).toContain('Taklif qilgan mijozdan 1000 ball bekor qilindi');
+    expect(text).toContain('Buyurtmada ishlatish uchun 2000 ball band qilindi');
+    expect(text).toContain('Band qilingan 2000 ball qaytarildi (buyurtma bekor qilindi)');
   });
 
   test('no bonus history block when the order has none', async () => {

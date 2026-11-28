@@ -308,6 +308,117 @@ describe.skipIf(!enabled)('Payme refund of a paid order (local)', () => {
     } }));
   });
 
+  test('R9 balance, debt and history agree after reservation, cancel, refund, repeated Payme, manual corrections and repayment', { timeout: 60000 }, async () => {
+    // start from an empty history and a zero balance for both customers
+    await setBonus(buyerId, 0);
+    await setBonus(referrerId, 0);
+    const signs = { opening_balance: 1, earned: 1, commission: 1, refund_returned: 1, reservation_released: 1, admin_credit: 1, bonus_reserved: -1, refund_revoked: -1, admin_debit: -1 };
+    const ledger = async (uid) => (await service.from('bonus_history').select('kind, amount, order_id, reason, actor').eq('user_id', uid).order('id')).data;
+    const agree = async (label) => {
+      for (const uid of [buyerId, referrerId]) {
+        const h = await ledger(uid);
+        const sum = h.reduce((a, x) => a + (signs[x.kind] || 0) * x.amount, 0);
+        expect(await bonus(uid), `${label}: balance vs history`).toBe(sum);
+        const { data: ds } = await service.from('bonus_debts').select('id, amount, remaining').eq('user_id', uid);
+        for (const d of ds) {
+          const { data: dh } = await service.from('bonus_history').select('kind, amount').eq('debt_id', d.id);
+          const expected = d.amount - dh.filter(x => x.kind === 'debt_repaid').reduce((a, x) => a + x.amount, 0) + dh.filter(x => x.kind === 'debt_restored').reduce((a, x) => a + x.amount, 0);
+          expect(d.remaining, `${label}: debt vs history`).toBe(expected);
+        }
+      }
+      const { data: mism } = await admin.rpc('admin_bonus_reconciliation');
+      expect((mism || []).filter(m => [buyerId, referrerId].includes(m.user_id)), `${label}: reconciliation`).toEqual([]);
+    };
+    const steps = {};
+
+    // 1. manual credit: reason required, recorded as admin_credit with reason and admin
+    expect((await admin.rpc('admin_adjust_bonus', { p_user_id: buyerId, p_delta: 30000 })).data).toEqual({ result: 'reason_required' });
+    expect((await admin.rpc('admin_adjust_bonus', { p_user_id: buyerId, p_delta: 30000, p_reason: 'aksiya: sovg\'a' })).data).toMatchObject({ result: 'ok', new: 30000 });
+    const credit = (await ledger(buyerId)).at(-1);
+    expect(credit).toMatchObject({ kind: 'admin_credit', amount: 30000, reason: "aksiya: sovg'a", actor: env.adminEmail, order_id: null });
+    await agree('manual credit');
+
+    // 2. unpaid order with bonus: reserved, then Payme cancels it (state 1) → returned
+    const req = { account: 'user', items: [{ productId, quantity: 1 }], delivery: selfPickup, useBonusPoints: true };
+    const q = (await api({ ...req, mode: 'quote' })).json.quote;
+    const c = (await api({ ...req, mode: 'create', expectedTotal: q.total })).json.order;
+    const txU = `tx-${c.paymeOrderId}`;
+    await payme('CreateTransaction', { id: txU, time: Date.now(), amount: q.total * 100, account: { order_id: c.paymeOrderId } });
+    expect(await bonus(buyerId)).toBe(30000 - q.bonusPointsUsed);
+    await agree('reserved');
+    expect((await payme('CancelTransaction', { id: txU, reason: 3 })).result.state).toBe(-1);
+    expect(await bonus(buyerId)).toBe(30000);
+    expect((await history(c.orderNumber)).map(h => h.kind)).toEqual(['bonus_reserved', 'reservation_released']);
+    await agree('reservation released');
+    steps.reserve_release = q.bonusPointsUsed;
+
+    // 3. paid order Q with bonus: reserved → spent; purchase bonus + referral commission
+    const Q = await paid(5, true);
+    expect(Q.used).toBeGreaterThan(0);
+    await agree('paid with bonus');
+
+    // 4. paid order P (no bonus): purchase bonus + referral commission
+    await service.from('products').update({ stock: 30 }).eq('id', productId);
+    const P = await paid(5, false);
+    const earnedP = pct(P.subtotal, cfg.purchase), commP = pct(P.subtotal, cfg.commission);
+    await agree('second order');
+
+    // 5. both customers' balances go down (manual debits with a reason) so P's bonuses are partly spent
+    const bB = await bonus(buyerId), bR = await bonus(referrerId);
+    expect((await admin.rpc('admin_adjust_bonus', { p_user_id: buyerId, p_delta: -(bB - 4000), p_reason: 'test: sarflangan' })).data).toMatchObject({ result: 'ok', new: 4000 });
+    expect((await admin.rpc('admin_adjust_bonus', { p_user_id: referrerId, p_delta: -(bR - 1000), p_reason: 'test: sarflangan' })).data).toMatchObject({ result: 'ok', new: 1000 });
+    await agree('manual debits');
+
+    // 6. P refunded: what is on the balance is revoked, the rest becomes a debt
+    const resP = (await payme('CancelTransaction', { id: P.tx, reason: 5 })).result;
+    expect(resP.state).toBe(-2);
+    const rP = (await row(P.n)).refund;
+    expect(rP).toMatchObject({ bonus_revoked: 4000, bonus_shortfall: earnedP - 4000, referrer_revoked: 1000, referrer_shortfall: commP - 1000 });
+    await agree('refund with debt');
+    // 7. repeated Payme cancel: identical answer, nothing changes
+    const snap = { b: await bonus(buyerId), r: await bonus(referrerId), h1: (await ledger(buyerId)).length, h2: (await ledger(referrerId)).length };
+    expect((await payme('CancelTransaction', { id: P.tx, reason: 5 })).result).toEqual(resP);
+    expect({ b: await bonus(buyerId), r: await bonus(referrerId), h1: (await ledger(buyerId)).length, h2: (await ledger(referrerId)).length }).toEqual(snap);
+    await agree('repeated cancel');
+
+    // 8. a manual credit does NOT repay the debt
+    const debtsOf = async (uid) => (await service.from('bonus_debts').select('remaining').eq('user_id', uid)).data.map(d => d.remaining);
+    const debtBefore = await debtsOf(referrerId);
+    expect((await admin.rpc('admin_adjust_bonus', { p_user_id: referrerId, p_delta: 700, p_reason: "qo'lda tuzatish" })).data).toMatchObject({ result: 'ok', new: 700 });
+    expect(await debtsOf(referrerId)).toEqual(debtBefore);
+    expect((await ledger(referrerId)).at(-1)).toMatchObject({ kind: 'admin_credit', amount: 700, reason: "qo'lda tuzatish" });
+    await agree('manual credit with open debt');
+
+    // 9. next purchase R repays the debts first (buyer and referrer)
+    await service.from('products').update({ stock: 30 }).eq('id', productId);
+    const R = await paid(5, false);
+    const hR = await history(R.n);
+    expect(hR.filter(h => h.kind === 'debt_repaid').map(h => h.amount).sort((x, y) => x - y)).toEqual([earnedP - 4000, commP - 1000].sort((x, y) => x - y));
+    expect(await debtsOf(buyerId)).toEqual([0]);
+    expect(await debtsOf(referrerId)).toEqual([0]);
+    await agree('repayment');
+
+    // 10. R refunded: the repaid part goes back on P's debts, once; a repeat changes nothing
+    const resR = (await payme('CancelTransaction', { id: R.tx, reason: 5 })).result;
+    await agree('refund of the repaying purchase');
+    const snap2 = { d1: await debtsOf(buyerId), d2: await debtsOf(referrerId), h1: (await ledger(buyerId)).length };
+    expect((await payme('CancelTransaction', { id: R.tx, reason: 5 })).result).toEqual(resR);
+    expect({ d1: await debtsOf(buyerId), d2: await debtsOf(referrerId), h1: (await ledger(buyerId)).length }).toEqual(snap2);
+    await agree('repeated cancel of the repaying purchase');
+    const afterQ = Q.used;
+
+    const debts = async (uid) => (await service.from('bonus_debts').select('amount, remaining').eq('user_id', uid)).data;
+    console.log('RESULT', JSON.stringify({ R9: {
+      reserve_then_release: steps.reserve_release,
+      P: { used: P.used, earned: earnedP, commission: commP, refund: { returned: rP.bonus_returned, revoked: rP.bonus_revoked, buyer_debt: rP.bonus_shortfall, referrer_revoked: rP.referrer_revoked, referrer_debt: rP.referrer_shortfall } },
+      balance_after_Q: afterQ,
+      R_history: hR.map(h => `${h.kind}:${h.amount}`),
+      final: { buyer: await bonus(buyerId), referrer: await bonus(referrerId), buyer_debts: await debts(buyerId), referrer_debts: await debts(referrerId) },
+      buyer_ledger: (await ledger(buyerId)).map(h => `${h.kind}:${h.amount}`),
+      referrer_ledger: (await ledger(referrerId)).map(h => `${h.kind}:${h.amount}`)
+    } }));
+  });
+
   test('R7 two cancel notifications at the same time: one refund', async () => {
     const o = await paid(2, false);
     const s0 = await stock();

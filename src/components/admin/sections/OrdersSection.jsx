@@ -918,6 +918,8 @@ const OrdersSection = ({ onImageClick }) => {
                           commission: `Taklif qilgan mijozga komissiya: +${h.amount} ball`,
                           debt_repaid: `${who}: ${h.amount} ball bonus qarzini to'lashga ketdi${ref}`,
                           refund_returned: `Mijozga ishlatilgan ${h.amount} ball qaytarildi`,
+                          bonus_reserved: `Buyurtmada ishlatish uchun ${h.amount} ball band qilindi`,
+                          reservation_released: `Band qilingan ${h.amount} ball qaytarildi (buyurtma bekor qilindi)`,
                           refund_revoked: `${isBuyer ? 'Mijozdan' : 'Taklif qilgan mijozdan'} ${h.amount} ball bekor qilindi`,
                           debt_created: `${who}: ${h.amount} ball bonus qarzi yozildi${debt ? ` (hozir qoldi ${debt.remaining} ball)` : ''}`,
                           debt_restored: `${who}: ${h.amount} ball qarzga qaytarildi — bu buyurtma bonusi bilan to'langan edi${ref}`
