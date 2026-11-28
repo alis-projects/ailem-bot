@@ -62,7 +62,7 @@ describe('bulk status change', () => {
     fireEvent.change(bulk, { target: { value: 'Mark as Shipped' } });
     await act(async () => { fireEvent.click(screen.getByText("Qo'llash")); });
     expect(ctx.updateOrderStatus.mock.calls.map(c => c[0]).sort()).toEqual(['A1', 'A2']);   // never asked for P1 / R1
-    expect(m.toast.warning).toHaveBeenCalledWith("Yakunlandi: 1 ta yangilandi, 2 ta o'tkazib yuborildi (holati mos emas), 1 ta rad etildi (holati o'zgargan)");
+    expect(m.toast.warning).toHaveBeenCalledWith("Yangilandi: 1 · Holati mos emas (o'tkazildi): 2 · Server rad etdi: 1");
     expect(m.notify).not.toHaveBeenCalled();
   });
 });
